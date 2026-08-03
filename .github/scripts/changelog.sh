@@ -2,11 +2,15 @@
 #
 # Renders one changelog section from the change list `changes.sh` produces.
 #
-# Usage: changelog.sh <version> [<repository url>] < changes
+# Usage: changelog.sh <version> [<repository url>] [<date>] < changes
 #
 # The list is read from standard input. The same list decides the version, so a
 # section rendered from it can never describe a release the number disagrees
 # with.
+#
+# The date defaults to today, which is what a release wants. It is settable so
+# that an already published section can be re-rendered — after a change to this
+# script, say — without the rewrite moving the day the release went out.
 #
 # Each entry is printed as its description, attributed and linked:
 #
@@ -21,10 +25,9 @@
 
 set -euo pipefail
 
-version=${1:?usage: changelog.sh <version> [<repository url>] < changes}
+version=${1:?usage: changelog.sh <version> [<repository url>] [<date>] < changes}
 repo_url=${2:-}
-
-date=$(date +%Y-%m-%d)
+date=${3:-$(date +%Y-%m-%d)}
 
 # Populated by `collect`, read by `section`. One pass over the input rather than
 # one per heading: the input is a pipe and can only be read once.

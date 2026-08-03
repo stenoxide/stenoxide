@@ -11,7 +11,7 @@
 //! ```
 //!
 //! Because the intermediate states are private to this module and
-//! [`crate::image_io::buffer::ImageBuffer::new`] is `pub(crate)`, no caller can
+//! `ImageBuffer::new` is `pub(crate)`, no caller can
 //! fabricate a validated image or skip a gate: the ordering is enforced by the
 //! type system rather than by convention.
 

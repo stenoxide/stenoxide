@@ -17,11 +17,11 @@
 //!
 //! Syndrome-Trellis coding lives in an external C++ library that the build
 //! links only under the `ffi-stc` feature; without it `stc_encode_safe` and
-//! `stc_decode_safe` return [`StcError::FeatureNotEnabled`] and no payload can
+//! `stc_decode_safe` return `StcError::FeatureNotEnabled` and no payload can
 //! travel. The tests that need a real coder are therefore compiled only when
 //! the feature is on, and the default build asserts instead that the pipeline
 //! reaches the coder with everything else already satisfied — see
-//! [`embedding_stops_at_the_missing_coder`]. Running the round trips needs:
+//! `embedding_stops_at_the_missing_coder`. Running the round trips needs:
 //!
 //! ```text
 //! LIBSDC_PATH=/path/to/libsdc cargo test --workspace --features ffi-stc
@@ -305,7 +305,7 @@ fn undersized_image_is_rejected() {
 /// Compiled only without `ffi-stc`. It drives the same fixture through the same
 /// pipeline and asserts that the *only* thing standing between it and an
 /// embedded payload is the missing coder: reaching
-/// [`StcError::FeatureNotEnabled`] means the container was loaded, hashed,
+/// `StcError::FeatureNotEnabled` means the container was loaded, hashed,
 /// stretched into a key, encrypted, cost-mapped and found to have room, since
 /// every one of those steps precedes the first trellis pass and any of them
 /// could have failed first.

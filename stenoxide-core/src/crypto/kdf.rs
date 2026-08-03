@@ -97,7 +97,7 @@ pub trait KeyDeriver: Send + Sync {
 /// The production key deriver: Argon2id with compiled-in cost parameters.
 ///
 /// The parameters are held as fields rather than read from the constants at use
-/// time only so that [`Argon2Kdf::low_cost_for_tests`] can exist; no public
+/// time only so that `Argon2Kdf::low_cost_for_tests` can exist; no public
 /// constructor accepts them.
 pub struct Argon2Kdf {
     m_cost: u32,

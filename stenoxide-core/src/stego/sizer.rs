@@ -16,7 +16,7 @@
 //!    payload rate below which the modern rich-model detectors stay near chance.
 //! 2. **The coding efficiency.** Syndrome-Trellis Codes do not reach the
 //!    rate-distortion bound exactly, so a fraction of the gross bits is spent on
-//!    the code itself. [`STC_EFFICIENCY`] is the conservative share that
+//!    the code itself. `STC_EFFICIENCY` is the conservative share that
 //!    survives.
 //! 3. **The cryptographic overhead.** The Poly1305 tag rides inside the embedded
 //!    bits and is not payload, so it comes off the top.

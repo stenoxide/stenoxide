@@ -25,7 +25,7 @@
 //! # What travels in the container
 //!
 //! Nothing but bits. No metadata, no salt, no nonce, no length prefix outside
-//! the frame described in [`frame`]: the salt is recomputed from the image, the
+//! the frame described in `frame`: the salt is recomputed from the image, the
 //! nonce and the permutation seed are derived from it, and the only thing the
 //! receiver is told is how many ciphertext bytes to decode.
 

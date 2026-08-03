@@ -180,7 +180,7 @@ fn sampling_seed(pixels: &[u8]) -> [u8; 32] {
 /// Parallelised over pixels because this is the only part of the detector whose
 /// cost scales with the image rather than with the sample: the block analysis
 /// touches at most [`MAX_SAMPLES`] blocks, this touches every pixel.
-/// [`IndexedParallelIterator::collect`] preserves order, so the resulting plane
+/// Collecting an indexed parallel iterator preserves order, so the resulting plane
 /// is laid out exactly as the sequential version would lay it out.
 ///
 /// Shared with [`crate::cost::hill`], which runs its convolutions over the same
@@ -283,7 +283,7 @@ fn block_energies(luma: &[f32], width: usize, height: usize, x0: usize, y0: usiz
 /// 8x8 grid, divided by the same mean taken strictly inside blocks, pooled over
 /// the sampled blocks. Returns `None` when the image looks like it has never
 /// been through a lossy codec, which is the case whenever that ratio stays at
-/// or below [`ARTIFACT_THRESHOLD`].
+/// or below the rejection threshold of `1.3`.
 ///
 /// A value close to `1.0` means the grid lines are no sharper than the pixels
 /// around them and the image carries no 8x8 block structure; the larger the

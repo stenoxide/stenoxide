@@ -31,7 +31,7 @@
 //! element of the cover, stego and message arrays is `0` or `1`, never a packed
 //! byte. The payload crossing this module's safe surface is packed, so the
 //! wrappers unpack it on the way in and repack it on the way out; see
-//! [`unpack_bits`] and [`pack_bits`].
+//! `unpack_bits` and `pack_bits`.
 
 #![allow(unsafe_code)]
 

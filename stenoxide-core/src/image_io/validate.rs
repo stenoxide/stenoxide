@@ -65,7 +65,9 @@ pub enum ValidationError {
     DecodingError(String),
     /// The image is a lossless re-encoding of previously JPEG-compressed data.
     JpegArtifactsDetected {
-        /// Fraction of sampled blocks showing JPEG blocking artifacts.
+        /// Blocking ratio measured over the sampled 8x8 blocks. Around `1.0`
+        /// for a clean image; the higher it is, the stronger the JPEG grid. See
+        /// [`crate::image_io::jpeg_detect::detect_jpeg_artifacts`].
         ratio: f32,
     },
 }
@@ -99,8 +101,8 @@ impl fmt::Display for ValidationError {
             }
             ValidationError::JpegArtifactsDetected { ratio } => write!(
                 f,
-                "image shows JPEG compression artifacts in {:.1}% of the sampled blocks",
-                ratio * 100.0
+                "image shows an 8x8 JPEG block structure (blocking ratio {ratio:.2}, a clean \
+                 image scores about 1.00); use a container that was never JPEG-compressed"
             ),
         }
     }

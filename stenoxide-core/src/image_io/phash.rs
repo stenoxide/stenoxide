@@ -188,7 +188,11 @@ impl HashBits {
 /// `sample` is exactly one pixel as laid out by `color_space`, so every index
 /// below is in bounds by construction: the callers slice the buffer with
 /// [`ColorSpace::bytes_per_pixel`].
-fn luminance(sample: &[u8], color_space: ColorSpace) -> u8 {
+///
+/// Shared with [`crate::image_io::jpeg_detect`], which measures its block
+/// energies on the same luma plane. The two analyses must agree on what "the
+/// brightness of a pixel" means, so there is exactly one implementation of it.
+pub(super) fn luminance(sample: &[u8], color_space: ColorSpace) -> u8 {
     let (red, green, blue) = match color_space {
         // Grayscale is already luma; running it through the coefficients would
         // only add a rounding error.

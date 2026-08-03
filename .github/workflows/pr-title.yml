@@ -1,0 +1,71 @@
+name: Pull request title
+
+# Apart from the CI workflow on purpose. This has to re-run when the title is
+# edited, and `edited` fires on every change to the title or the body — folding
+# it into CI would rebuild and retest the whole workspace every time someone
+# reworded a paragraph. Worse, a skipped required check reads as a passing one,
+# so gating the test job on the event type would let an edit turn a red run
+# green.
+on:
+  pull_request:
+    branches: [main, stable]
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  pr-title:
+    name: Pull request title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate Conventional Commit title
+        id: check
+        continue-on-error: true
+        env:
+          # Through the environment, never interpolated into the script body: a
+          # pull request title is text an outsider chooses, and `${{ }}` pastes
+          # it into the shell before bash ever sees it.
+          TITLE: ${{ github.event.pull_request.title }}
+        run: bash .github/scripts/check-title.sh "$TITLE"
+
+      # Repairing rather than rejecting is safe here because the title does not
+      # decide anything. This repository squashes with the list of replaced
+      # commits in the body, and that list outranks the subject when the release
+      # job computes the version — the title is documentation. The prefix is
+      # taken from the same list, so it cannot describe the release wrongly.
+      #
+      # Skipped for pull requests from forks, where the token is read-only.
+      - name: Repair the title from the commits it carries
+        if: >-
+          steps.check.outcome == 'failure' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          FIXED=$(bash .github/scripts/fix-title.sh "$BASE" "$TITLE")
+          gh api -X PATCH "repos/${{ github.repository }}/pulls/$NUMBER" -f title="$FIXED" >/dev/null
+          {
+            echo "The title was not a Conventional Commit and has been rewritten."
+            echo
+            echo "    was: $TITLE"
+            echo "    now: $FIXED"
+          } >> "$GITHUB_STEP_SUMMARY"
+          bash .github/scripts/check-title.sh "$FIXED"
+
+      - name: Reject the title
+        if: >-
+          steps.check.outcome == 'failure' &&
+          github.event.pull_request.head.repo.full_name != github.repository
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: bash .github/scripts/check-title.sh "$TITLE"

@@ -119,6 +119,99 @@ Examples:
 
 ---
 
+## Commit Conventions
+
+Once the prompt phase closes, work lands on `main` through pull requests and
+`main` is promoted to `stable` when it has accumulated enough to release. The
+release pipeline reads the commits to decide the version, so **a commit subject
+is an instruction to that pipeline, not a label**. Getting the type wrong
+publishes the wrong version number.
+
+Every commit subject and every pull request title has this shape:
+
+    <type>[(scope)][!]: <description>
+
+### Types, and what each one does to the version
+
+| Type | Meaning | Bump |
+|------|---------|------|
+| `feat` | New capability a user can reach | minor |
+| `fix` | Corrected behaviour | patch |
+| `perf` | Faster or leaner, same behaviour | patch |
+| `refactor` | Internal restructuring, same behaviour | patch |
+| `docs` | Documentation only | patch |
+| `test` | Tests only | patch |
+| `build` | Build system, manifests, packaging | patch |
+| `ci` | Workflows and release tooling | patch |
+| `chore` | Dependencies, housekeeping | patch |
+| `style` | Formatting only | patch |
+| `revert` | Undoes an earlier commit | patch |
+
+Nothing outside this list. An unrecognised type is not rejected by the release
+job — it is silently counted as a patch and lands in the changelog as noise.
+
+### Dependency bumps do not move the version
+
+A commit scoped `(deps)` or `(deps-dev)`, or whose description reads
+`bump <package> from <a> to <b>`, is recorded in the changelog under
+*Dependencies* and contributes no bump at all. These arrive generated and in
+bulk, and a resolver moving a transitive crate from `0.25.1` to `0.25.2` is not
+something a caller can observe. A merge carrying nothing else leaves the version
+where it was and publishes nothing.
+
+When a bump *does* break something — a raised MSRV, a dependency whose API leaks
+through ours — mark it `chore(deps)!:` and it becomes a major like any other.
+
+### Breaking changes
+
+A `!` before the colon, or a `BREAKING CHANGE:` footer in the body, bumps the
+major version:
+
+    refactor(stego)!: rework the permutation seed
+
+    BREAKING CHANGE: images embedded by earlier releases cannot be decoded.
+
+Reserve it for what actually breaks a caller: a changed public signature, a
+removed flag, a stego image an earlier release can no longer read. Not for
+internal rewrites that preserve behaviour. A stray `!` publishes a major version
+and there is no taking it back off crates.io.
+
+### Bumps accumulate
+
+Every qualifying commit in a release moves the version once, in order — the
+release is not collapsed into a single highest bump. From `1.2.3`, a series of
+`fix, fix, fix, feat, fix, feat, fix` lands on `1.4.1`, not on `1.3.0`:
+
+    1.2.4  1.2.5  1.2.6  1.3.0  1.3.1  1.4.0  1.4.1
+
+Order matters, which is why this is not a count of each type: the three patches
+at the front are absorbed by the minor that follows them, the one after it
+survives.
+
+### Scopes
+
+The module the change lands in: `core`, `cli`, `crypto`, `stego`, `cost`,
+`image-io`, `pipeline`, `deps`. Optional, but use it when the change is confined
+to one of them.
+
+### Descriptions
+
+Imperative, lowercase, no trailing period, English:
+
+    feat(cli): read the payload from a file
+    fix(core): off-by-one in the capacity check
+    chore(deps): bring image to 0.25
+
+### Pull request titles
+
+Squash merging is the norm, and a squash writes the pull request title as the
+subject of the commit that lands on the branch. When the squash body carries the
+list of replaced commits, that list is what the release job reads and the title
+is discarded; when it does not, the title is the only thing there is. Either
+way it must be a Conventional Commit, and CI rejects it if it is not.
+
+---
+
 ## Code Standards
 
 These rules apply to every file you write or modify:

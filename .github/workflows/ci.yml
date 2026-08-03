@@ -1,0 +1,55 @@
+name: CI
+
+# Both branches are gated by the same job. `main` collects work and gets the
+# correctness checks; `stable` publishes, so it additionally has to prove the
+# dependency tree is clean and that both crates still package.
+on:
+  pull_request:
+    branches: [main, stable]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test and validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: cargo clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Install cargo-audit
+        if: github.base_ref == 'stable'
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit
+        if: github.base_ref == 'stable'
+        run: cargo audit
+
+      # A single workspace-wide dry run instead of one per crate: packaging
+      # stenoxide-cli on its own asks crates.io for a stenoxide-core that may
+      # not be there yet, and fails. `--workspace` resolves the dependency
+      # against the freshly packaged sibling, so the check works before the
+      # first publication as well as after it.
+      - name: cargo publish dry-run
+        if: github.base_ref == 'stable'
+        run: cargo publish --workspace --dry-run

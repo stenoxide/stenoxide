@@ -6,9 +6,23 @@
 # nothing about the property this project actually exists for: that a third
 # party holding the stego image cannot tell it apart from an ordinary picture.
 # Only a detector can answer that, so this script builds a set of containers,
-# embeds a payload in every one stenoxide accepts, and hands the results to
-# Aletheia — an external steganalysis toolkit that does not know anything about
-# how the payload was placed.
+# embeds into every one stenoxide accepts, and hands the results to Aletheia —
+# an external steganalysis toolkit that does not know anything about how the
+# payload was placed.
+#
+# Two things make the answer worth reading, and both are about asking the
+# detector a question it can answer:
+#
+#   - Every container is embedded into twice: once with a few dozen bytes, and
+#     once with 80% of the capacity it reports. The hard limit is 0.02 bits per
+#     pixel and the small payload sits two orders of magnitude below it, so a
+#     detector handed only that has nothing to find and a pass on it means
+#     little. The loaded case is the one under test; the small one is the
+#     control it is read against.
+#   - Every stego image is cut into a 3x3 grid of 512x512 crops before the
+#     detector sees it, and the score reported is the median of the nine.
+#     Aletheia's models are trained at that size, and a 2000x2000 container is
+#     outside the range they were fitted on.
 #
 # Nothing here touches the repository. Aletheia is cloned into a temporary
 # directory outside the working tree, the covers and the stego images live in a
@@ -45,9 +59,49 @@ readonly FAIL_MIN=0.6
 # routinely, which is exactly why one real photograph is in the set.
 readonly CONFIDENCE_MIN=0.6
 
-# What gets hidden. Short on purpose: the question is whether the embedding is
-# visible to a detector, and a larger payload would only raise the rate.
-readonly PAYLOAD='test payload for steganalysis validation'
+# The reference payload: a few dozen bytes, some 0.0001 bpp against a ceiling of
+# 0.02. Far too little for a detector to have anything to find, which is exactly
+# what makes it useful — it is the control the loaded case is read against.
+readonly REFERENCE_PAYLOAD='test payload for steganalysis validation'
+
+# Share of the container's measured capacity the loaded case fills.
+#
+# The question the run exists to answer is whether the embedding is visible at
+# the rate the system actually permits, and the reference payload above answers
+# a different, easier one. Eighty per cent puts the embedding just under the
+# limit while leaving room for the frame the pipeline writes around the payload
+# and for the couple of bytes Zstandard adds to material it cannot compress.
+readonly CAPACITY_SHARE=0.80
+
+# The share retried after a refusal.
+#
+# The capacity `scan` reports is what the container admits *after* encryption,
+# and the loaded payload is random bytes, which Zstandard makes slightly larger
+# rather than smaller. Eighty per cent leaves room for that in every case
+# measured, but the margin is not something this script can compute exactly
+# without reimplementing the sizer, so a refusal drops to seventy and tries once
+# more instead of failing the run.
+readonly CAPACITY_SHARE_RETRY=0.70
+
+# Side of the crops handed to the detector, in pixels.
+#
+# Not a choice. Aletheia's neural models are trained on the 512x512 crops of
+# ALASKA2 and BOSSbase, and a 2000x2000 image is outside the range they were
+# fitted on: handed one they return a confident-looking probability with an
+# accuracy estimate of exactly one half, on a photograph as readily as on a
+# synthetic cover. That is not a finding about the image, it is the shape of a
+# model being asked a question it was not trained to answer.
+readonly CROP_SIDE=512
+
+# Crops taken per stego image: a 3x3 grid.
+readonly CROP_COUNT=9
+
+# Crops that must clear the confidence floor before the aggregate is read.
+#
+# The score reported per image is the median of its nine crops, and a median is
+# only worth quoting when most of the values behind it mean something. Five of
+# nine is the smallest majority.
+readonly MIN_CONFIDENT_CROPS=5
 
 # Password used when the run is fully automated.
 #
@@ -96,13 +150,16 @@ usage() {
     cat <<EOF
 Usage: $SCRIPT_NAME [options]
 
-Builds a set of container images, embeds a payload in every one stenoxide
-accepts, and runs the Aletheia steganalysis toolkit over the results.
+Builds a set of container images, embeds two payloads into every one stenoxide
+accepts — a few dozen bytes and 80% of the container's capacity — cuts the
+results into 512x512 crops, and runs the Aletheia steganalysis toolkit over
+them.
 
 Options:
   --skip-analysis    Generate the covers and run the embeddings, but do not
-                     install or run Aletheia. Useful to check the first half of
-                     the pipeline on a machine that cannot run the detector.
+                     crop, install or run Aletheia. Useful to check the first
+                     half of the pipeline on a machine that cannot run the
+                     detector.
   --keep-work-dir    Do not delete the temporary directory holding the covers
                      and the stego images.
   --accept-external-licenses
@@ -279,10 +336,13 @@ trap cleanup EXIT
 
 readonly COVERS_DIR="$WORK_DIR/covers"
 readonly STEGO_DIR="$WORK_DIR/stego"
+readonly CROPS_DIR="$WORK_DIR/crops"
 readonly REPORT_DIR="$WORK_DIR/report"
 readonly NOTES_FILE="$REPORT_DIR/covers.tsv"
 readonly OUTCOMES_FILE="$REPORT_DIR/outcomes.tsv"
 readonly RAW_REPORT="$REPORT_DIR/aletheia_raw.txt"
+
+mkdir -p "$CROPS_DIR"
 
 : >"$NOTES_FILE"
 : >"$OUTCOMES_FILE"
@@ -722,28 +782,68 @@ PYTHON_GENERATOR
 # Step 5 — embedding
 # --------------------------------------------------------------------------
 
+# Payload bytes the container at $1 admits, or nothing when it admits none.
+#
+# Asked of the binary rather than computed here. The capacity is a function of
+# the cost map, the coding efficiency and the tag, and a second implementation
+# of that arithmetic in shell would be a second thing to keep in step with the
+# sizer — `scan --json` is the answer the system itself gives.
+container_capacity() {
+    "$STENOXIDE" scan "$(native_path "$1")" --json 2>/dev/null |
+        "$VENV_PYTHON" -c '
+import json, sys
+
+try:
+    document = json.load(sys.stdin)
+except json.JSONDecodeError:
+    sys.exit(1)
+
+for record in document.get("valid", []):
+    print(int(record["capacity_kb"] * 1024))
+    break
+'
+}
+
+# Writes `$2` bytes of incompressible material to the file at `$1`.
+#
+# Random on purpose, and the point of the whole exercise. The capacity gate
+# measures the payload *after* compression, so anything with structure would be
+# squeezed to a few dozen bytes and embedded at a rate two orders of magnitude
+# below the one being tested. Random bytes cannot be compressed, so the run
+# reaches the real capacity limit of the ciphertext rather than the limit of a
+# compressible plaintext.
+write_random_payload() {
+    "$VENV_PYTHON" -c '
+import os, sys
+
+with open(sys.argv[1], "wb") as handle:
+    handle.write(os.urandom(int(sys.argv[2])))
+' "$(native_path "$1")" "$2"
+}
+
 # Runs one embedding, returning stenoxide's own exit status.
 #
-# The payload always arrives on standard input. What changes between the two
-# modes is only where the password comes from; in the automated one the whole
-# command is handed to `script`, which runs it under a pseudo-terminal and
-# forwards its own standard input to that terminal, so the password reaches the
-# prompt while the payload keeps the pipe to itself.
+# The payload always arrives on standard input, read from the file at `$4`. What
+# changes between the two modes is only where the password comes from; in the
+# automated one the whole command is handed to `script`, which runs it under a
+# pseudo-terminal and forwards its own standard input to that terminal, so the
+# password reaches the prompt while the payload keeps the pipe to itself.
 embed_one() {
-    local cover=$1 stego=$2 log=$3
+    local cover=$1 stego=$2 log=$3 payload_file=$4
     local status=0
 
     if [[ -n $PTY_RUNNER ]]; then
         local command
-        printf -v command 'printf %%s %q | %q embed --input %q --output %q' \
-            "$PAYLOAD" "$STENOXIDE" "$(native_path "$cover")" "$(native_path "$stego")"
+        printf -v command 'cat %q | %q embed --input %q --output %q' \
+            "$(native_path "$payload_file")" "$STENOXIDE" \
+            "$(native_path "$cover")" "$(native_path "$stego")"
         printf '%s\n' "$PASSWORD" |
             script -qec "$command" /dev/null >"$log" 2>&1 || status=$?
     else
-        printf '%s' "$PAYLOAD" |
-            "$STENOXIDE" embed \
-                --input "$(native_path "$cover")" \
-                --output "$(native_path "$stego")" >"$log" 2>&1 || status=$?
+        "$STENOXIDE" embed \
+            --input "$(native_path "$cover")" \
+            --output "$(native_path "$stego")" \
+            <"$payload_file" >"$log" 2>&1 || status=$?
     fi
 
     # A pseudo-terminal echoes what is written to it until the reader turns
@@ -767,6 +867,29 @@ if [[ -z $PTY_RUNNER ]]; then
     info 'Any password will do; it only has to be typed, not remembered.'
 fi
 
+# Extracts the refusal reason from an embedding transcript.
+#
+# Whatever the layer that refused wrote, kept verbatim: a rejection is a result
+# of this run, not a failure of it, and rephrasing it here would hide which gate
+# spoke.
+#
+# Matched on the prefix the front-end puts in front of every failure rather than
+# taken by position. The password prompt ends without a newline, so under a
+# pseudo-terminal the message shares a line with it, and the transcript carries
+# several lines that are not the error.
+refusal_reason() {
+    local log=$1 reason
+
+    reason=$(tr -d '\r' <"$log" | grep -o 'Error: .*' | head -n 1) || true
+    reason=${reason#Error: }
+
+    if [[ -z $reason ]]; then
+        reason=$(tr -d '\r' <"$log" | grep -v '^$' | tail -n 1) || true
+    fi
+
+    printf '%s' "${reason:-no message}"
+}
+
 cover_count=0
 rejected_count=0
 embedded_count=0
@@ -774,33 +897,70 @@ embedded_count=0
 for cover in "$COVERS_DIR"/*.png; do
     [[ -e $cover ]] || continue
     name=${cover##*/}
+    base=${name%.png}
     cover_count=$((cover_count + 1))
-    log="$REPORT_DIR/embed_${name%.png}.log"
 
-    if embed_one "$cover" "$STEGO_DIR/$name" "$log"; then
-        embedded_count=$((embedded_count + 1))
-        printf '%s\tembedded\t%s\n' "$name" "$(
-            grep -E 'Effective rate' "$log" | tr -d '\r' | sed 's/^ *//'
-        )" >>"$OUTCOMES_FILE"
-        info "  $name: embedded"
-    else
-        rejected_count=$((rejected_count + 1))
-        # The refusal reason is whatever the layer that refused wrote. Kept
-        # verbatim: a rejection is a result of this run, not a failure of it,
-        # and rephrasing it here would hide which gate spoke.
-        #
-        # Matched on the prefix the front-end puts in front of every failure
-        # rather than taken by position. The password prompt ends without a
-        # newline, so under a pseudo-terminal the message shares a line with
-        # it, and the transcript carries several lines that are not the error.
-        reason=$(tr -d '\r' <"$log" | grep -o 'Error: .*' | head -n 1) || true
-        reason=${reason#Error: }
-        if [[ -z $reason ]]; then
-            reason=$(tr -d '\r' <"$log" | grep -v '^$' | tail -n 1) || true
+    # The container is measured before anything is embedded, so the loaded case
+    # knows what to fill. A capacity of nothing means a container the gates
+    # refuse, and the reference case below is what turns that into the sentence
+    # the refusing layer wrote.
+    capacity=$(container_capacity "$cover") || true
+
+    # Two embeddings per container, written as two stego images so that the
+    # detector judges each on its own. The names carry the case, and the report
+    # splits them apart again on the double underscore.
+    for case_name in reference loaded; do
+        stego="$STEGO_DIR/${base}__${case_name}.png"
+        log="$REPORT_DIR/embed_${base}_${case_name}.log"
+        payload_file="$WORK_DIR/payload_${base}_${case_name}.bin"
+
+        if [[ $case_name == reference ]]; then
+            printf '%s' "$REFERENCE_PAYLOAD" >"$payload_file"
+            payload_bytes=${#REFERENCE_PAYLOAD}
+        else
+            # Nothing to load into a container that admits nothing. The
+            # reference case has already recorded why.
+            [[ -n $capacity && $capacity -gt 0 ]] || continue
+
+            payload_bytes=$("$VENV_PYTHON" -c \
+                "print(int($capacity * $CAPACITY_SHARE))")
+            write_random_payload "$payload_file" "$payload_bytes"
         fi
-        printf '%s\trejected\t%s\n' "$name" "${reason:-no message}" >>"$OUTCOMES_FILE"
-        info "  $name: rejected — ${reason:-no message}"
-    fi
+
+        if ! embed_one "$cover" "$stego" "$log" "$payload_file"; then
+            # The loaded case gets one retry at a smaller share. Random bytes
+            # grow slightly under Zstandard, and how much is not something this
+            # script can predict without reimplementing the sizer.
+            if [[ $case_name == loaded ]]; then
+                payload_bytes=$("$VENV_PYTHON" -c \
+                    "print(int($capacity * $CAPACITY_SHARE_RETRY))")
+                write_random_payload "$payload_file" "$payload_bytes"
+                info "  $name ($case_name): retrying at $payload_bytes bytes"
+            fi
+
+            if ! embed_one "$cover" "$stego" "$log" "$payload_file"; then
+                rejected_count=$((rejected_count + 1))
+                reason=$(refusal_reason "$log")
+                printf '%s\trejected\t%s\t%s\t%s\n' \
+                    "${base}__${case_name}.png" "$reason" "$case_name" "$payload_bytes" \
+                    >>"$OUTCOMES_FILE"
+                info "  $name ($case_name): rejected — $reason"
+                continue
+            fi
+        fi
+
+        embedded_count=$((embedded_count + 1))
+        rate=$(grep -E 'Effective rate' "$log" | tr -d '\r' | sed 's/^ *//')
+        printf '%s\tembedded\t%s\t%s\t%s\n' \
+            "${base}__${case_name}.png" "$rate" "$case_name" "$payload_bytes" \
+            >>"$OUTCOMES_FILE"
+        info "  $name ($case_name): embedded, $payload_bytes bytes"
+
+        # The payload is deleted as soon as the embedding that used it has
+        # returned. A kept working directory has no business carrying the
+        # plaintext of what was hidden in the images beside it.
+        rm -f "$payload_file"
+    done
 done
 
 [[ $cover_count -gt 0 ]] || die 'no container images were generated; nothing to analyse.'
@@ -811,9 +971,11 @@ done
 
 if [[ $skip_analysis == true ]]; then
     step 'Analysis skipped'
-    info "covers:  $cover_count"
-    info "embedded: $embedded_count"
-    info "rejected: $rejected_count"
+    # Two embeddings per accepted container, so the counts below are of
+    # embeddings and not of covers.
+    info "covers:     $cover_count"
+    info "embeddings: $embedded_count"
+    info "rejected:   $rejected_count"
     info ''
     info 'Re-run without --skip-analysis to have Aletheia judge the stego images.'
     print_reuse_hint
@@ -827,6 +989,70 @@ if [[ $embedded_count -eq 0 ]]; then
     info 'detection question unanswered.'
     exit 1
 fi
+
+step 'Cropping the stego images to the detector resolution'
+
+info "Taking a 3x3 grid of ${CROP_SIDE}x${CROP_SIDE} crops from every stego image."
+info 'Aletheia was trained on crops of that size; a whole 2000x2000 container is'
+info 'outside the range its models were fitted on, and the number they return for'
+info 'one carries no information.'
+
+"$VENV_PYTHON" - \
+    "$(native_path "$STEGO_DIR")" \
+    "$(native_path "$CROPS_DIR")" \
+    "$CROP_SIDE" <<'PYTHON_CROPPER'
+"""Cuts every stego image into the 3x3 grid of crops the detector is judged on.
+
+The crops are taken losslessly: no resampling, no re-encoding through a lossy
+codec, and PNG on the way out. Any of those would alter the least significant
+bits the whole analysis is about, and the detector would be reading the
+resampler rather than the embedding.
+
+Positions are spread across the frame rather than tiled from a corner. The
+embedding is scattered over the whole container by a secret permutation, so nine
+windows sampling the frame evenly is what makes the median of their scores a
+statement about the image rather than about one part of it.
+"""
+
+import os
+import sys
+
+from PIL import Image
+
+STEGO_DIR, CROPS_DIR, CROP_SIDE = sys.argv[1], sys.argv[2], int(sys.argv[3])
+
+# Where each crop starts, as a fraction of the space left over once the crop
+# itself is accounted for: hard against one edge, centred, hard against the
+# other. Three of these along each axis is the 3x3 grid.
+POSITIONS = (0.0, 0.5, 1.0)
+
+os.makedirs(CROPS_DIR, exist_ok=True)
+
+for name in sorted(os.listdir(STEGO_DIR)):
+    if not name.lower().endswith(".png"):
+        continue
+
+    image = Image.open(os.path.join(STEGO_DIR, name))
+    width, height = image.size
+
+    if width < CROP_SIDE or height < CROP_SIDE:
+        print(f"  {name}: {width}x{height} is smaller than one crop; skipped")
+        continue
+
+    stem = name[: -len(".png")]
+    written = 0
+
+    for row, vertical in enumerate(POSITIONS):
+        for column, horizontal in enumerate(POSITIONS):
+            left = int((width - CROP_SIDE) * horizontal)
+            top = int((height - CROP_SIDE) * vertical)
+
+            crop = image.crop((left, top, left + CROP_SIDE, top + CROP_SIDE))
+            crop.save(os.path.join(CROPS_DIR, f"{stem}__crop{row}{column}.png"))
+            written += 1
+
+    print(f"  {name}: {written} crops")
+PYTHON_CROPPER
 
 step 'Running Aletheia'
 info 'This runs on the CPU and is slow; several minutes per image is normal.'
@@ -843,7 +1069,7 @@ if [[ $accept_licenses == true ]]; then
     : >"$LICENSE_ANSWERS"
     for _ in $(seq 1 32); do printf 'y\n' >>"$LICENSE_ANSWERS"; done
 
-    if ! (cd "$ALETHEIA_DIR" && "$VENV_PYTHON" aletheia.py auto "$(native_path "$STEGO_DIR")" \
+    if ! (cd "$ALETHEIA_DIR" && "$VENV_PYTHON" aletheia.py auto "$(native_path "$CROPS_DIR")" \
         <"$LICENSE_ANSWERS") >"$RAW_REPORT" 2>&1; then
         warn 'Aletheia exited with an error; the report below is built from whatever it printed.'
     fi
@@ -852,7 +1078,7 @@ else
     info 'before downloading it. Its output is shown as it runs so the prompts can'
     info 'be answered; --accept-external-licenses answers them for you.'
 
-    if ! (cd "$ALETHEIA_DIR" && "$VENV_PYTHON" aletheia.py auto "$(native_path "$STEGO_DIR")") \
+    if ! (cd "$ALETHEIA_DIR" && "$VENV_PYTHON" aletheia.py auto "$(native_path "$CROPS_DIR")") \
         2>&1 | tee "$RAW_REPORT"; then
         warn 'Aletheia exited with an error; the report below is built from whatever it printed.'
     fi
@@ -870,15 +1096,25 @@ set +e
     "$cover_count" \
     "$PASS_MAX" \
     "$FAIL_MIN" \
-    "$CONFIDENCE_MIN" <<'PYTHON_REPORT'
+    "$CONFIDENCE_MIN" \
+    "$CROP_SIDE" \
+    "$CROP_COUNT" \
+    "$MIN_CONFIDENT_CROPS" <<'PYTHON_REPORT'
 """Turns Aletheia's table into a verdict.
 
 Aletheia prints one row per image with a column per detector; the column that
-matters here is HILL, because that is the cost function stenoxide embeds
-under. Everything else on the row is noise for this purpose.
+matters here is HILL, because that is the cost function stenoxide embeds under.
+Everything else on the row is noise for this purpose.
+
+The rows are crops, not containers. Every stego image was cut into a 3x3 grid
+before the detector saw it, so the score reported per image is the median of the
+nine — and the median rather than the mean because a single crop that happens to
+land on a smooth part of the frame should move the answer by one rank and not by
+its whole distance.
 """
 
 import re
+import statistics
 import sys
 
 # The table below is drawn with box characters, which a console left on a
@@ -910,6 +1146,12 @@ RAW_PATH, NOTES_PATH, OUTCOMES_PATH = sys.argv[1], sys.argv[2], sys.argv[3]
 COVER_COUNT = int(sys.argv[4])
 PASS_MAX, FAIL_MIN = float(sys.argv[5]), float(sys.argv[6])
 CONFIDENCE_MIN = float(sys.argv[7])
+CROP_SIDE, CROP_COUNT = int(sys.argv[8]), int(sys.argv[9])
+MIN_CONFIDENT_CROPS = int(sys.argv[10])
+
+# How a crop file names the stego image it came from and its position in the
+# grid: `<container>__<case>__crop<row><column>.png`.
+CROP_NAME = re.compile(r"^(?P<image>.+)__crop(?P<row>\d)(?P<column>\d)$")
 
 # A cell is either a bare probability or a probability with the confidence of
 # the model beside it, and a probability above the detector's own boundary is
@@ -974,15 +1216,48 @@ def parse_aletheia(text):
     return results
 
 
-def verdict(score, confidence):
-    """Grades one row, refusing to read a score the model does not stand behind.
+def aggregate(rows):
+    """Collapses the crops of one stego image into a single score.
 
-    The accuracy estimate is checked first and on purpose. A model that cannot
-    separate cover from stego on this container will still emit a number, and
-    that number carries no information whichever side of the threshold it
-    falls on: reading it as a detection would be reading noise.
+    Returns the median score, the median confidence and how many of the crops
+    stood behind their own number. Only the confident crops feed the medians:
+    including a crop the model has no opinion about would let noise vote on the
+    answer, which is the failure mode the floor exists to prevent.
+
+    A container with no confident crop at all still reports the median of what
+    came back, so that the table has a number to show beside the count that
+    disqualifies it.
     """
-    if confidence is not None and confidence < CONFIDENCE_MIN:
+    confident = [
+        (score, confidence)
+        for score, confidence in rows
+        if confidence is not None and confidence >= CONFIDENCE_MIN
+    ]
+
+    if confident:
+        scores = [score for score, _ in confident]
+        confidences = [confidence for _, confidence in confident]
+    else:
+        scores = [score for score, _ in rows]
+        confidences = [confidence for _, confidence in rows if confidence is not None]
+
+    return (
+        statistics.median(scores) if scores else None,
+        statistics.median(confidences) if confidences else None,
+        len(confident),
+    )
+
+
+def verdict(score, confident_crops):
+    """Grades one stego image from its aggregate.
+
+    The count of confident crops is checked first and on purpose. A model that
+    cannot separate cover from stego on this container will still emit a number
+    for every crop, and those numbers carry no information whichever side of the
+    threshold they fall on: reading their median as a detection would be reading
+    noise with extra steps.
+    """
+    if score is None or confident_crops < MIN_CONFIDENT_CROPS:
         return "UNRELIABLE"
     if score < PASS_MAX:
         return "PASS"
@@ -1004,26 +1279,68 @@ def row(cells, widths):
 with open(RAW_PATH, encoding="utf-8", errors="replace") as handle:
     raw = handle.read()
 
-scores = parse_aletheia(raw)
+crop_scores = parse_aletheia(raw)
 notes = dict(read_pairs(NOTES_PATH))
 outcomes = read_pairs(OUTCOMES_PATH)
 
-embedded = [name for name, state, *_ in outcomes if state == "embedded"]
+
+def crops_of(image):
+    """Every crop row belonging to one stego image."""
+    rows = []
+    stem = image[: -len(".png")] if image.endswith(".png") else image
+
+    for name, values in crop_scores.items():
+        candidate = name[: -len(".png")] if name.endswith(".png") else name
+        match = CROP_NAME.match(candidate)
+        if match and match.group("image") == stem:
+            rows.append(values)
+
+    return rows
+
+
+# One record per embedding: the stego image, which case it was, how many bytes
+# went in, and the rate stenoxide reported.
+embeddings = []
+for name, state, *rest in outcomes:
+    if state != "embedded":
+        continue
+
+    detail = rest[0] if rest else ""
+    case = rest[1] if len(rest) > 1 else ""
+    payload_bytes = int(rest[2]) if len(rest) > 2 and rest[2].isdigit() else None
+    match = re.search(r"([0-9]*\.[0-9]+)\s*bpp", detail)
+
+    embeddings.append(
+        {
+            "image": name,
+            "case": case,
+            "payload_bytes": payload_bytes,
+            "bpp": float(match.group(1)) if match else None,
+        }
+    )
 
 # The rate each embedding actually ran at, taken from what stenoxide reported.
 # The verdict line quotes it rather than the 0.02 hard limit: the limit is what
-# the coder will never exceed, and a short payload lands far below it, so
-# naming the limit would credit the run with a test it did not perform.
-rates = [
-    float(match.group(1))
-    for _, state, *rest in outcomes
-    if state == "embedded"
-    for match in [re.search(r"([0-9]*\.[0-9]+)\s*bpp", rest[0] if rest else "")]
-    if match
-]
-rejected = [(name, rest[0] if rest else "") for name, state, *rest in outcomes if state == "rejected"]
+# the coder will never exceed, and quoting it would credit the run with a test
+# it did not perform.
+rates = [record["bpp"] for record in embeddings if record["bpp"] is not None]
 
-banner = BANNER * 54
+rejected = [
+    (name, rest[0] if rest else "")
+    for name, state, *rest in outcomes
+    if state == "rejected"
+]
+
+def human_bytes(count):
+    """A payload size a person can read at a glance."""
+    if count is None:
+        return "?"
+    if count < 1024:
+        return f"{count} B"
+    return f"{count / 1024:.1f} KB"
+
+
+banner = BANNER * 66
 print()
 print(banner)
 print(" stenoxide steganalysis validation report")
@@ -1031,42 +1348,58 @@ print(banner)
 print()
 print(f"  Cover images tested:     {COVER_COUNT}")
 print(f"  Rejected by stenoxide:   {len(rejected)}  (expected for smooth/jpeg images)")
-print(f"  Stego images analyzed:   {len(scores)}")
+print(f"  Stego images analyzed:   {len(embeddings)}")
+print(f"  Analysis:                {CROP_COUNT} x {CROP_SIDE}x{CROP_SIDE} crops per image, median score")
 print()
 
-widths = [25, 5, 10, 10]
+widths = [22, 15, 9, 6, 10, 7, 11]
 detected = []
 judged = []
 unmatched = []
 
-if scores:
+if crop_scores:
     print("  Results (HILL detector):")
     print("  " + rule(TOP, widths))
-    print("  " + row(["Image", "Score", "Confidence", "Status"], widths))
+    print(
+        "  "
+        + row(
+            ["Container", "Payload", "Rate", "Score", "Confidence", "Crops", "Status"],
+            widths,
+        )
+    )
     print("  " + rule(MIDDLE, widths))
 
-    for name in embedded:
-        match = next(
-            (key for key in scores if key == name or name.startswith(key.rstrip("."))),
-            None,
-        )
-        if match is None:
-            unmatched.append(name)
+    for record in embeddings:
+        rows = crops_of(record["image"])
+        if not rows:
+            unmatched.append(record["image"])
             continue
 
-        score, confidence = scores[match]
-        status = verdict(score, confidence)
+        score, confidence, confident_crops = aggregate(rows)
+        status = verdict(score, confident_crops)
+
         if status == "FAIL":
-            detected.append((name, score))
+            detected.append((record["image"], score))
         elif status != "UNRELIABLE":
-            judged.append(name)
+            judged.append(record["image"])
+
+        # The container and the case are one string in the file name and two
+        # columns here: the case is what the row is about, and repeating the
+        # container on both of its rows is what makes them comparable.
+        container, _, case = record["image"].rpartition("__")
+        container = container or record["image"]
+        case = case[: -len(".png")] if case.endswith(".png") else case
+
         print(
             "  "
             + row(
                 [
-                    name[: widths[0]],
-                    f"{score:.2f}",
+                    f"{container}"[: widths[0]],
+                    f"{case}: {human_bytes(record['payload_bytes'])}"[: widths[1]],
+                    "?" if record["bpp"] is None else f"{record['bpp']:.4f}",
+                    "?" if score is None else f"{score:.2f}",
                     "n/a" if confidence is None else f"{confidence:.2f}",
+                    f"{confident_crops}/{len(rows)}",
                     status,
                 ],
                 widths,
@@ -1074,6 +1407,9 @@ if scores:
         )
 
     print("  " + rule(BOTTOM, widths))
+    print()
+    print(f"  Crops: how many of the {CROP_COUNT} cleared the {CONFIDENCE_MIN:.2f} confidence")
+    print(f"  floor. Fewer than {MIN_CONFIDENT_CROPS} makes the aggregate UNRELIABLE.")
     print()
 else:
     print("  Aletheia produced no HILL scores. Tail of its output:")
@@ -1100,19 +1436,32 @@ if skipped:
         print(f"  - {name}: {text}")
     print()
 
-if scores and not judged and not detected:
-    print("  Every score came with an accuracy estimate below "
-          f"{CONFIDENCE_MIN:.2f}, which is the detector")
-    print("  reporting that it cannot separate cover from stego on these")
-    print("  containers. Nothing here is evidence either way.")
+if crop_scores and not judged and not detected:
+    print(f"  No container had {MIN_CONFIDENT_CROPS} crops clearing the "
+          f"{CONFIDENCE_MIN:.2f} confidence floor,")
+    print("  which is the detector reporting that it cannot separate cover from")
+    print("  stego on this material. Nothing here is evidence either way.")
     print()
 
+# Always printed, whatever the verdict. A PASS is a narrower claim than it
+# reads as, and the run that produced it is the right place to say so.
+print("  Notes:")
+print("  - Neural detectors (HILL, UNIWARD, LSBM) are trained against a")
+print("    particular source of covers. A model trained on images from the same")
+print("    camera as the container would score it differently.")
+print("  - Classical estimators (WS, RS, SPA) depend on no trained model, so")
+print("    their scores are valid whatever the container's provenance and")
+print("    whatever its size.")
+print("  - A PASS means Aletheia cannot detect the embedding. It does not mean")
+print("    no detector can.")
+print()
+
 print(banner)
-if not scores:
+if not crop_scores:
     print(f" OVERALL: INCONCLUSIVE {DASH} the analysis produced no result")
     status = 1
 elif not judged and not detected:
-    print(f" OVERALL: INCONCLUSIVE {DASH} no score met the confidence floor")
+    print(f" OVERALL: INCONCLUSIVE {DASH} too few crops met the confidence floor")
     status = 1
 elif detected:
     print(f" OVERALL: FAIL {DASH} detection above threshold, review cover image quality")

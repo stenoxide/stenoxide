@@ -29,6 +29,13 @@
 //!
 //! [`compute_stable_phash`]: stenoxide_core::image_io::phash::compute_stable_phash
 
+// Cargo compiles this module separately into every integration binary that
+// declares it, and each of those uses a different part of it — `crypto.rs` only
+// wants the cover, `integration.rs` wants all three fixtures. Anything the
+// binary being compiled does not touch would otherwise be reported as dead,
+// which is a fact about that one binary rather than about this file.
+#![allow(dead_code)]
+
 use std::f32::consts::TAU;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
@@ -36,7 +43,7 @@ use std::sync::Once;
 use image::codecs::jpeg::JpegEncoder;
 use image::{ExtendedColorType, ImageFormat, RgbImage};
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// Side length of the covers, in pixels.
 ///
@@ -181,7 +188,7 @@ pub fn ensure_fixtures() {
 pub fn incompressible_payload(len: usize) -> Vec<u8> {
     let mut rng = StdRng::seed_from_u64(PAYLOAD_SEED);
 
-    (0..len).map(|_| rng.gen()).collect()
+    (0..len).map(|_| rng.random()).collect()
 }
 
 /// Writes a 500x500 PNG to `path`.
@@ -254,7 +261,7 @@ fn laundered_jpeg() -> RgbImage {
             0.0
         };
 
-        let grain: f32 = rng.gen_range(-3.0..=3.0);
+        let grain: f32 = rng.random_range(-3.0..=3.0);
         let level = (base + edge + grain).clamp(0.0, 255.0) as u8;
 
         image::Rgb([level, level.saturating_sub(6), level.saturating_add(4)])
@@ -315,7 +322,7 @@ fn control_grid(rng: &mut StdRng) -> Vec<f32> {
 
     (0..side * side)
         .map(|_| {
-            if rng.gen_bool(0.5) {
+            if rng.random_bool(0.5) {
                 FIELD_AMPLITUDE
             } else {
                 -FIELD_AMPLITUDE
@@ -386,8 +393,8 @@ fn shoulder(t: f32) -> f32 {
 fn gaussian(rng: &mut StdRng, sigma: f32) -> f32 {
     // Bounded away from zero: `ln(0)` is negative infinity, and a single
     // infinite grain sample would clip to a black or white pixel.
-    let uniform: f32 = rng.gen_range(f32::EPSILON..1.0);
-    let angle: f32 = rng.gen_range(0.0..TAU);
+    let uniform: f32 = rng.random_range(f32::EPSILON..1.0);
+    let angle: f32 = rng.random_range(0.0..TAU);
 
     sigma * (-2.0 * uniform.ln()).sqrt() * angle.cos()
 }

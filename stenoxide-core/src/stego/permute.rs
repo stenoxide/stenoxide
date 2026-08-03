@@ -32,7 +32,7 @@
 //! `bound / 2^64`.
 
 use chacha20::cipher::{KeyIvInit, StreamCipher};
-use chacha20::{ChaCha20, Key, Nonce};
+use chacha20::ChaCha20;
 use zeroize::ZeroizeOnDrop;
 
 /// Nonce of the keystream that drives the shuffle.
@@ -81,7 +81,7 @@ impl KeystreamReader {
     /// refills it rather than returning the zeros it was constructed with.
     fn new(seed: &[u8; 32]) -> Self {
         Self {
-            cipher: ChaCha20::new(Key::from_slice(seed), Nonce::from_slice(&PERMUTATION_NONCE)),
+            cipher: ChaCha20::new(seed.into(), (&PERMUTATION_NONCE).into()),
             buffer: [0u8; KEYSTREAM_BUFFER_BYTES],
             cursor: KEYSTREAM_BUFFER_BYTES,
         }

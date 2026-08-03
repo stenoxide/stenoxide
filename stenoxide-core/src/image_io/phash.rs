@@ -17,14 +17,14 @@
 //!
 //! - `k == 0` unstable bits: the hash is reproducible, embedding proceeds.
 //! - `k == 1`: the image is still usable, but the receiver has to try both
-//!   values of the uncertain bit; [`recover_phash_salt`] does exactly that.
+//!   values of the uncertain bit; `recover_phash_salt` does exactly that.
 //! - `k >= 2`: rejected. Two uncertain bits would mean four hypotheses, each
 //!   costing a full Argon2id derivation, and the number doubles from there.
 //!
 //! The margin filter also absorbs a second, subtler source of divergence: the
 //! DCT is built on `cos`, which is not specified bit-exactly by IEEE 754 and
 //! may differ in the last place between platforms. A bit whose margin exceeds
-//! [`DELTA_MIN`] cannot be flipped by an error of that size.
+//! `DELTA_MIN` cannot be flipped by an error of that size.
 
 use std::f32::consts::PI;
 use std::fmt;
@@ -119,7 +119,7 @@ impl PHashSalt {
 /// Every way perceptual hashing can fail.
 #[derive(Debug)]
 pub enum PHashError {
-    /// Too many coefficients sit within [`DELTA_MIN`] of the median for the
+    /// Too many coefficients sit within `DELTA_MIN` of the median for the
     /// hash to be reproducible after embedding.
     InsufficientStability {
         /// How many of the 64 bits are uncertain.
@@ -426,7 +426,7 @@ pub(crate) fn phash_salt_hypotheses(img: &ImageBuffer) -> Result<PHashHypotheses
 /// # Errors
 ///
 /// Returns [`PHashError::InsufficientStability`] when more than
-/// [`MAX_UNSTABLE_BITS`] coefficients sit within [`DELTA_MIN`] of the median.
+/// `MAX_UNSTABLE_BITS` coefficients sit within `DELTA_MIN` of the median.
 /// Note that a single unstable bit is *accepted* here: the sender does not
 /// care which value it takes, because the receiver resolves the ambiguity
 /// during extraction.
@@ -470,7 +470,16 @@ fn prefix_matches_key(keys: &DerivedKeys, ciphertext_prefix: &[u8]) -> bool {
     }
 
     let mut plaintext = Zeroizing::new(head.to_vec());
-    if cipher.apply_keystream_b2b(head, &mut plaintext).is_err() {
+
+    // The fallible form: as of `cipher` 0.5 the plain `apply_keystream_b2b`
+    // panics when the two buffers differ in length, and a panic is not
+    // something this crate is allowed to reach for. The lengths do match here —
+    // `plaintext` was built from `head` — so the branch is unreachable, and it
+    // stays as a branch rather than an assertion for exactly that reason.
+    if cipher
+        .try_apply_keystream_b2b(head, &mut plaintext)
+        .is_err()
+    {
         return false;
     }
 

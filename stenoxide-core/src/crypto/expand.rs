@@ -17,7 +17,7 @@
 
 use std::fmt;
 
-use hkdf::Hkdf;
+use hkdf::SimpleHkdf;
 use sha3::Sha3_512;
 use zeroize::ZeroizeOnDrop;
 
@@ -104,7 +104,20 @@ impl DerivedKeys {
 /// the fixed lengths used here that cannot happen in practice, but the error is
 /// propagated rather than swallowed.
 pub fn expand_master_key(mk: &MasterKey) -> Result<DerivedKeys, ExpandError> {
-    let hkdf = Hkdf::<Sha3_512>::new(None, mk.as_bytes());
+    // `SimpleHkdf`, not `Hkdf`. The two compute the same HMAC of RFC 2104 and
+    // agree byte for byte — `expansion_matches_pinned_vectors` is what holds
+    // that claim down — but they reach it differently. `Hkdf` builds on
+    // `Hmac<D>`, which requires `D: EagerHash` so it can precompute the padded
+    // states through the digest block API; `SimpleHkdf` builds on `SimpleHmac`,
+    // which asks only for `Digest + BlockSizeUser`.
+    //
+    // That distinction is what keeps this crate on current dependencies. As of
+    // `sha3` 0.12 the SHA-3 family is implemented as a self-contained sponge
+    // and no longer exposes the block API at all, so `Hmac<Sha3_512>` — and
+    // with it `Hkdf<Sha3_512>` — does not compile. The simple form does, and
+    // gives up nothing but an optimisation that is invisible next to the
+    // Argon2id pass preceding it.
+    let hkdf = SimpleHkdf::<Sha3_512>::new(None, mk.as_bytes());
 
     // Started zeroed and filled in place: if an expansion fails midway, the
     // partially written struct is dropped and wiped by `ZeroizeOnDrop`.
@@ -122,4 +135,66 @@ pub fn expand_master_key(mk: &MasterKey) -> Result<DerivedKeys, ExpandError> {
         .map_err(|err| ExpandError::HkdfError(err.to_string()))?;
 
     Ok(keys)
+}
+
+#[cfg(test)]
+mod tests {
+    // The crate-wide `deny(clippy::expect_used)` reaches into `cfg(test)` code
+    // as well. A test that cannot panic cannot fail, so the ban is lifted here
+    // and only here — every `expect` below is an assertion about a value the
+    // test itself constructed.
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    /// Known-answer test pinning the output of the whole expansion.
+    ///
+    /// These vectors are not taken from a standard — there is no published one
+    /// for this particular chain — but from this implementation itself, and that
+    /// is exactly what makes them useful. Every subkey the system derives is a
+    /// function of `MasterKey` and three info strings, and nothing about that
+    /// function is transmitted or stored: sender and receiver each recompute it.
+    /// A dependency upgrade that silently altered a single byte here would not
+    /// break a build or fail a round trip run entirely on the new version; it
+    /// would simply make every image produced by an older build unreadable, and
+    /// the first evidence would be a user with an unrecoverable payload.
+    ///
+    /// The values were captured under `sha3` 0.11 with `hkdf::Hkdf` and verified
+    /// unchanged after moving to `sha3` 0.12 with [`SimpleHkdf`], which is the
+    /// migration they were written for.
+    #[test]
+    fn expansion_matches_pinned_vectors() {
+        const ENC_KEY: [u8; 32] = [
+            0x9a, 0x09, 0x5f, 0x87, 0xbf, 0x45, 0x5d, 0x1c, 0x30, 0x61, 0x94, 0xd1, 0x58, 0xdb,
+            0x7c, 0xfa, 0x6b, 0x10, 0xd9, 0xe6, 0x29, 0xd9, 0xb1, 0x43, 0xcd, 0x3b, 0xb6, 0x76,
+            0x89, 0xd5, 0xb9, 0x36,
+        ];
+        const NONCE: [u8; 24] = [
+            0x34, 0x83, 0xe6, 0x2d, 0x0b, 0xae, 0x7f, 0xae, 0x8d, 0x13, 0x77, 0x3a, 0x98, 0x97,
+            0x89, 0x3b, 0x97, 0xcb, 0x56, 0x66, 0x0f, 0x49, 0xee, 0x3f,
+        ];
+        const STC_SEED: [u8; 32] = [
+            0x35, 0x52, 0xd3, 0x1e, 0x7e, 0x52, 0xdb, 0xa7, 0x77, 0xf8, 0x75, 0xd4, 0xa4, 0x86,
+            0xb2, 0xea, 0x5f, 0x38, 0x08, 0xaa, 0xa1, 0x4d, 0x0d, 0xeb, 0x21, 0x31, 0x4e, 0x62,
+            0x42, 0x90, 0x8e, 0x11,
+        ];
+
+        let keys = expand_master_key(&MasterKey::new([7u8; 32])).expect("expansion must succeed");
+
+        assert_eq!(keys.enc_key(), &ENC_KEY);
+        assert_eq!(keys.nonce(), &NONCE);
+        assert_eq!(keys.stc_seed(), &STC_SEED);
+    }
+
+    /// The three subkeys must be independent draws, not the same bytes reused.
+    ///
+    /// They differ only by their info string, so this is what would catch the
+    /// domain separation being dropped or two constants colliding.
+    #[test]
+    fn subkeys_are_domain_separated() {
+        let keys = expand_master_key(&MasterKey::new([1u8; 32])).expect("expansion must succeed");
+
+        assert_ne!(keys.enc_key().as_slice(), keys.stc_seed().as_slice());
+        assert_ne!(&keys.enc_key()[..24], keys.nonce().as_slice());
+    }
 }

@@ -129,6 +129,87 @@ and how much each can carry.
   models more easily than a photograph's.
 - Anything below 2000x2000.
 
+### Why these restrictions exist
+
+They look arbitrary from the outside, and a refusal is easier to accept once you
+know what it is protecting. Each one comes from a different part of the system.
+
+**Why lossless, and why PNG.** The message is carried in the least significant
+bit of individual samples. A lossy codec works by discarding precisely the
+detail the eye does not notice — which is the same detail the payload is written
+into. Saving a stego image as JPEG does not degrade the message, it deletes it:
+the bits are re-derived from quantised frequency coefficients and none of the
+original least significant bits survive. This is also why the transport matters
+so much; a messaging app that "optimises" your photo has destroyed the payload
+before the recipient sees it. PNG is simply the lossless format everything can
+read.
+
+**Why a PNG that was once a JPEG is still refused.** Converting a JPEG to PNG
+makes the file lossless from that moment on, which is why it feels like it
+should be enough. It is not, because the conversion preserves the pixels the
+JPEG decoder produced, and those carry the codec's fingerprint: JPEG quantises
+the image in independent 8x8 blocks, so the reconstruction error does not agree
+across a block edge and the decoded image has a faint step at every eighth row
+and column that the original scene never had.
+
+That matters because steganalysis is a comparison against an expected
+distribution. An image with a known 8x8 structure is one whose statistics an
+analyst can model precisely — and once they can model the container, anything
+added on top of it is a deviation from a known baseline rather than noise among
+noise. A clean photograph gives them nothing to subtract. stenoxide measures
+this directly and refuses anything showing the grid.
+
+**Why 2000x2000.** This is the one that follows from arithmetic rather than
+from statistics. The embedding rate is capped at 0.02 bits per pixel — a
+compile-time constant, not a setting — because detection accuracy against modern
+detectors climbs steeply with the rate, and everything else the system does buys
+invisibility only in the low-rate regime.
+
+With the rate fixed, capacity is a straight function of pixel count. Four
+megapixels at 0.02 bpp is about eighty thousand bits gross; after the share the
+Syndrome-Trellis coder spends on the code itself and the authentication tag, a
+2000x2000 container carries roughly 8 KB of encrypted payload. Halve the sides
+and you have a quarter of that. Below the minimum there is no useful message
+left to send, and the only way to send one anyway would be to raise the rate —
+which is exactly the trade the cap exists to refuse. A larger image is strictly
+better: more capacity, and the same message spread thinner.
+
+**Why texture, and why smooth images are rejected.** Two independent parts of
+the system want the same thing, for different reasons.
+
+The cost model asks where a change would be least visible, and the answer is
+always: where there is already something going on. A modified pixel in dense
+foliage disappears among a thousand neighbours that disagree with each other. A
+modified pixel in a clear sky is the only thing in its neighbourhood that is not
+where it should be, and both a detector and an eye find it immediately.
+
+The second reason is less obvious and is the one that actually fires. The
+encryption key is salted with a perceptual hash of the container, and that hash
+is never stored — the recipient recomputes it from the image they received. For
+that to work, the hash has to come out identical before and after embedding. It
+is built from 64 frequency coefficients compared against their own median, and a
+smooth image concentrates nearly all its energy in a handful of low frequencies,
+leaving the rest piled up around a near-zero median. Coefficients sitting that
+close to the boundary can be pushed across it by the smallest change, and if one
+flips, the salt changes, the key changes, and the message is unrecoverable — by
+anyone, including you. So an image without texture is refused before anything is
+embedded, rather than producing a stego image that silently cannot be read back.
+
+**Why some PNGs are refused for their pixel layout.** 8-bit RGB and RGBA,
+16-bit RGB, and 8-bit grayscale are accepted; the rarer layouts a PNG can carry,
+such as grayscale-with-alpha, are not. There is nothing wrong with them — they
+are simply layouts the embedder was not written against, and accepting one it
+handled incorrectly would be worse than refusing it. Re-saving as ordinary RGB
+resolves it, and costs nothing as long as you do it losslessly.
+
+**Why the container must not exist anywhere else.** This is the only restriction
+stenoxide cannot check, and the most important. Every gate above is about making
+the stego image hard to distinguish from *a plausible cover*. None of that
+survives an adversary holding the actual cover: subtracting the two images
+reveals every changed pixel directly, with no statistics involved. A published
+photograph, a stock image, anything from a search result — the comparison is
+available to anyone who thinks to look, and no embedding scheme survives it.
+
 ## Choosing a password
 
 - At least 16 random characters, or a passphrase of six words or more drawn at

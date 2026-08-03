@@ -137,9 +137,21 @@ an intercepted image is looking for.
 
 ## Requirements
 
-- PNG container image: minimum 2000x2000 pixels, with natural camera texture.
-- No prior JPEG compression on the container image. A PNG saved from a JPEG
-  still carries the 8x8 block grid and is refused.
+The container image has to satisfy four conditions, and `stenoxide scan` checks
+all of them for you. Each one exists for a reason, and none of them is a
+preference:
+
+| Requirement | Why |
+|-------------|-----|
+| **PNG**, or any lossless format | The payload lives in the least significant bits of the samples. A lossy codec rewrites exactly those, so a container saved as JPEG or WebP is a destroyed payload rather than a weakened one. |
+| **Never JPEG-compressed**, even if it is a PNG now | Decoding a JPEG and re-saving it as PNG keeps the pixels the codec produced, 8x8 block grid included. A steganalyst already knows the statistics of that grid, so anything added on top of it stands out against a signal they can model. |
+| **At least 2000x2000 pixels** | The embedding rate is capped at 0.02 bits per pixel, and that cap is what keeps the changes invisible. Capacity is therefore a direct function of pixel count: four megapixels buy about 8 KB. Below this size there is no useful payload left to carry without raising the rate, and the rate is not negotiable. |
+| **Natural texture**: foliage, fabric, stone, grass | A change can only hide where there is already detail to hide it in. Smooth regions — sky, walls, skin, plain backgrounds — offer nothing to hide behind, and an image that is smooth throughout also fails to hash reproducibly, which the key derivation depends on. |
+
+One more condition the tool cannot check: **the container must not exist
+anywhere else.** An adversary who finds the original subtracts the two images
+and sees every changed pixel at once. See [OPSEC.md](OPSEC.md), which explains
+each of these in full.
 
 ## Crates
 

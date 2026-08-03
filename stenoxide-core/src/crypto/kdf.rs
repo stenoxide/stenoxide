@@ -119,8 +119,12 @@ impl Argon2Kdf {
     /// Builds a deliberately weak deriver so that tests do not spend 128 MiB
     /// and hundreds of milliseconds per derivation.
     ///
-    /// Compiled only under `cfg(test)`, so it cannot leak into a release build.
-    #[cfg(test)]
+    /// Compiled only under `cfg(test)` or the `test-utils` feature, so it
+    /// cannot leak into a release build. The feature exists because a
+    /// `cfg(test)` item is invisible to the integration tests in `tests/`,
+    /// which link the library as an external crate; the crate's dev-dependency
+    /// on itself is the only thing that ever enables it.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn low_cost_for_tests() -> Self {
         Self {
             m_cost: 8,

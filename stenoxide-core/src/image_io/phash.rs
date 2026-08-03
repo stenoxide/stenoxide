@@ -418,14 +418,19 @@ pub(crate) fn phash_salt_hypotheses(img: &ImageBuffer) -> Result<PHashHypotheses
 /// Computes the perceptual hash salt of a container image, refusing images
 /// whose hash would not survive embedding.
 ///
+/// Public so that the stability of a container can be asked about on its own,
+/// without running an embedding. The returned salt is opaque outside this
+/// crate — it has no public accessor — so exposing this function grants the
+/// verdict and not the value.
+///
 /// # Errors
 ///
 /// Returns [`PHashError::InsufficientStability`] when more than
 /// [`MAX_UNSTABLE_BITS`] coefficients sit within [`DELTA_MIN`] of the median.
 /// Note that a single unstable bit is *accepted* here: the sender does not
-/// care which value it takes, because the receiver resolves it through
-/// [`recover_phash_salt`].
-pub(crate) fn compute_stable_phash(img: &ImageBuffer) -> Result<PHashSalt, PHashError> {
+/// care which value it takes, because the receiver resolves the ambiguity
+/// during extraction.
+pub fn compute_stable_phash(img: &ImageBuffer) -> Result<PHashSalt, PHashError> {
     Ok(phash_salt_hypotheses(img)?.primary)
 }
 

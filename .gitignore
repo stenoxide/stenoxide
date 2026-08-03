@@ -2,3 +2,7 @@
 prompts/
 *.env
 LIBSDC_PATH
+
+# Test fixtures are generated on demand by the integration suite, never
+# committed. See stenoxide-core/tests/support/mod.rs.
+stenoxide-core/tests/fixtures/

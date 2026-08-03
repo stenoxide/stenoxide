@@ -23,6 +23,16 @@ ml-kem = { workspace = true, optional = true }
 [build-dependencies]
 cc.workspace = true
 
+[dev-dependencies]
+# The crate depends on itself so that its own integration tests are linked
+# against a build with `test-utils` enabled. A `#[cfg(test)]` item is invisible
+# to `tests/`, which is compiled as an external consumer of the library, and the
+# cheap key deriver has to be reachable from there.
+stenoxide-core = { path = ".", features = ["test-utils"] }
+image.workspace = true
+rand.workspace = true
+tempfile.workspace = true
+
 [features]
 default = []
 # Post-quantum key encapsulation support.
@@ -30,3 +40,6 @@ pqc = ["dep:ml-kem"]
 # Compiles and links the libsdc++ Syndrome-Trellis Codes library in build.rs.
 # Must stay disabled until PROMPT 6.
 ffi-stc = []
+# Exposes the deliberately weak test constructors. Enabled only by this crate's
+# own dev-dependency on itself; a release build never turns it on.
+test-utils = []

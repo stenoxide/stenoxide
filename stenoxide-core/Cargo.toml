@@ -40,6 +40,14 @@ rand.workspace = true
 tempfile.workspace = true
 static_assertions.workspace = true
 
+# A research harness, not a product surface: it builds the matched cover/stego
+# pairs that `scripts/synthetic_cover_analysis` measures. It reaches into
+# `test_support`, so it cannot build without the feature that compiles it, and
+# `cargo build --examples` on a default checkout must not try.
+[[example]]
+name = "synthetic_cover_probe"
+required-features = ["test-utils"]
+
 [features]
 default = []
 # Post-quantum key encapsulation support.

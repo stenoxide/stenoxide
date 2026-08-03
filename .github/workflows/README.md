@@ -52,18 +52,51 @@ a failed build never produces a half-populated release.
 
 ## Versioning
 
-Versions follow Conventional Commits. Each commit subject between the last tag
-and `HEAD` is classified, and the highest classification present decides the
-bump:
+`scripts/changes.sh` lists the Conventional Commit changes since the last tag,
+oldest first, one per line, each classified as breaking, feat, fix or other.
+`scripts/next-version.sh` walks that list and applies one bump per change:
 
-| Commit subject | Bump |
-|----------------|------|
-| `BREAKING CHANGE`, `feat!:`, `fix!:` | major |
-| `feat:` | minor |
-| `fix:`, `chore:`, `docs:`, `refactor:`, `perf:` | patch |
+| Change | Bump |
+|--------|------|
+| `!` before the colon, or a `BREAKING CHANGE:` footer | major |
+| `feat` | minor |
+| scoped `(deps)` / `(deps-dev)`, or `bump <pkg> from <a> to <b>` | none |
+| everything else | patch |
+
+Dependency bumps are listed in the changelog under *Dependencies* and move
+nothing. They arrive generated and in bulk, and a resolver stepping a crate from
+`0.25.1` to `0.25.2` is not a change a caller can observe. A merge carrying
+nothing else leaves the version where it is, and the release job stands down —
+no tag, no build, no publication — rather than failing on a tag that exists.
+
+**Bumps accumulate.** The release is not collapsed into the single highest bump
+present. From `1.2.3`, the sequence `fix, fix, fix, feat, fix, breaking, fix,
+feat, fix` walks through
+
+    1.2.4  1.2.5  1.2.6  1.3.0  1.3.1  2.0.0  2.0.1  2.1.0  2.1.1
+
+and releases `2.1.1`. Order is what makes this different from counting each
+type: the three patches at the front are absorbed by the minor that follows
+them, and everything before the breaking change is absorbed by it.
 
 With no tag in the repository the version already written in `Cargo.toml` is
 used unchanged; that is how the first release picks its own number.
+
+### Squashed merges
+
+A squash writes the pull request title as the subject and the subjects of the
+commits it replaced into the body, as a `*` list. Where that list exists it is
+authoritative and the title is discarded — the title summarises the very lines
+below it, and reading both would count the same work twice. Where it does not,
+the title is all there is, which is why CI rejects a pull request whose title is
+not a Conventional Commit.
+
+A `BREAKING CHANGE:` footer applies to its whole commit and is emitted after
+that commit's other changes, so the major bump absorbs them and one breaking
+commit moves the version once.
+
+The changelog is built from the same list that produced the version, so the two
+can never disagree.
 
 ### Overriding the version by hand
 
@@ -72,11 +105,26 @@ root `Cargo.toml` is **greater** than what the commits imply, the manual value
 wins and is released as written. To ship `1.0.0` out of a series of `fix:`
 commits, set `version = "1.0.0"` in the root `[workspace.package]` and merge.
 
-Both member crates inherit that number through `version.workspace = true`, so
-the root manifest is the only place to edit. The workflow additionally rewrites
-the registry requirement `stenoxide-cli` states on `stenoxide-core`, which has
-to track the version or a major bump would leave the CLI depending on a range
-the newly published core does not satisfy.
+### Where the version lives
+
+Three places, all of them written by the workflow:
+
+| Location | How |
+|----------|-----|
+| `Cargo.toml`, `[workspace.package] version` | Rewritten by the release job. |
+| `stenoxide-cli/Cargo.toml`, the `version` in the `stenoxide-core` dependency | Rewritten to the same number. |
+| `Cargo.lock` | Regenerated with `cargo update --workspace`. |
+
+Both member crates inherit the number through `version.workspace = true`, so
+the root manifest is the only one to edit by hand. The dependency requirement
+is the one that cannot be inherited: `path` is stripped when the crate is
+packaged, and what remains is the registry requirement `^X.Y.Z`. Left at an old
+number, a major release would publish `stenoxide-core 2.0.0` and then a
+`stenoxide-cli` asking for `^1.0.0`, which the registry refuses.
+
+That synchronisation runs on every release, including the ones where the
+version did not change — a hand-written bump in `Cargo.toml` is precisely the
+case where the dependency requirement is most likely to have been forgotten.
 
 ## Secrets
 

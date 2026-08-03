@@ -16,6 +16,7 @@ jobs:
 
     outputs:
       next_version: ${{ steps.version.outputs.next }}
+      release: ${{ steps.version.outputs.release }}
 
     steps:
       # `ref: stable` rather than the default: on a closed pull_request the
@@ -40,17 +41,16 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      # Derive the next version from the commit subjects since the last tag:
-      #   BREAKING CHANGE, feat! or fix!  -> major
-      #   feat                            -> minor
-      #   anything else                   -> patch
-      # With no previous tag the version already in Cargo.toml is taken as is.
-      # A hand-written version greater than the calculated one always wins, so
-      # a deliberate bump in Cargo.toml is never overwritten.
+      # One bump per change, applied in order — see next-version.sh. With no
+      # previous tag the version already in Cargo.toml is taken as is, and a
+      # hand-written version greater than the calculated one always wins, so a
+      # deliberate bump in Cargo.toml is never overwritten.
       - name: Calculate next version
         id: version
         run: |
-          CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "//;s/"//')
+          set -o pipefail
+
+          CURRENT=$(grep -m1 '^version' Cargo.toml | sed 's/version = "//;s/"//')
           echo "current=$CURRENT" >> $GITHUB_OUTPUT
 
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
@@ -58,53 +58,44 @@ jobs:
 
           if [ "$LAST_TAG" = "none" ]; then
             echo "next=$CURRENT" >> $GITHUB_OUTPUT
-            echo "is_first=true" >> $GITHUB_OUTPUT
+            echo "release=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          echo "is_first=false" >> $GITHUB_OUTPUT
-
-          COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=format:"%s")
-
-          MAJOR=0
-          MINOR=0
-          PATCH=0
-
-          while IFS= read -r commit; do
-            if echo "$commit" | grep -qE "BREAKING CHANGE|^feat!|^fix!"; then
-              MAJOR=1
-            elif echo "$commit" | grep -qE "^feat"; then
-              MINOR=1
-            elif echo "$commit" | grep -qE "^fix|^chore|^docs|^refactor|^perf"; then
-              PATCH=1
-            fi
-          done <<< "$COMMITS"
-
-          MAJOR_V=$(echo $CURRENT | cut -d. -f1)
-          MINOR_V=$(echo $CURRENT | cut -d. -f2)
-          PATCH_V=$(echo $CURRENT | cut -d. -f3)
-
-          if [ $MAJOR -eq 1 ]; then
-            CALCULATED="$((MAJOR_V + 1)).0.0"
-          elif [ $MINOR -eq 1 ]; then
-            CALCULATED="${MAJOR_V}.$((MINOR_V + 1)).0"
-          else
-            CALCULATED="${MAJOR_V}.${MINOR_V}.$((PATCH_V + 1))"
-          fi
+          CALCULATED=$(bash .github/scripts/changes.sh "${LAST_TAG}..HEAD" \
+            | bash .github/scripts/next-version.sh "$CURRENT")
 
           if [ "$(printf '%s\n' "$CALCULATED" "$CURRENT" | sort -V | tail -1)" = "$CURRENT" ] && [ "$CURRENT" != "$CALCULATED" ]; then
-            echo "next=$CURRENT" >> $GITHUB_OUTPUT
+            NEXT=$CURRENT
           else
-            echo "next=$CALCULATED" >> $GITHUB_OUTPUT
+            NEXT=$CALCULATED
+          fi
+          echo "next=$NEXT" >> $GITHUB_OUTPUT
+
+          # Nothing moved the version, which happens when a merge carried only
+          # dependency bumps. There is nothing to tag and nothing to publish, so
+          # the rest of the pipeline stands down rather than failing on a tag
+          # that already exists.
+          if git rev-parse -q --verify "refs/tags/v${NEXT}" >/dev/null; then
+            echo "release=false" >> $GITHUB_OUTPUT
+            echo "v${NEXT} is already tagged; no release to make." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "release=true" >> $GITHUB_OUTPUT
           fi
 
       # Both member crates inherit `version.workspace = true`, so the root
-      # manifest is the only place the number lives. The one exception is the
-      # registry requirement stenoxide-cli states on stenoxide-core, which has
-      # to move with it or a major bump would leave the CLI asking for a
+      # manifest is the only place the number itself lives. The one exception is
+      # the registry requirement stenoxide-cli states on stenoxide-core, which
+      # has to move with it or a major bump would leave the CLI asking for a
       # version range the newly published core no longer satisfies.
-      - name: Bump version in Cargo.toml
-        if: steps.version.outputs.current != steps.version.outputs.next
+      #
+      # Unconditional on purpose. When the version is raised by hand in
+      # Cargo.toml the calculated version equals the current one, and a step
+      # that only ran on a difference would skip exactly the case where the
+      # dependency requirement was most likely left behind. Both edits are
+      # no-ops when everything already agrees.
+      - name: Synchronise version across the workspace
+        if: steps.version.outputs.release == 'true'
         run: |
           NEXT=${{ steps.version.outputs.next }}
           sed -i "s/^version = \"${{ steps.version.outputs.current }}\"/version = \"$NEXT\"/" Cargo.toml
@@ -112,44 +103,54 @@ jobs:
           cargo update --workspace
 
       - name: Generate changelog
+        if: steps.version.outputs.release == 'true'
         run: |
           VERSION=${{ steps.version.outputs.next }}
           DATE=$(date +%Y-%m-%d)
           LAST_TAG=${{ steps.version.outputs.last_tag }}
 
           if [ "$LAST_TAG" = "none" ]; then
-            COMMITS=$(git log --pretty=format:"- %s" | head -50)
+            CHANGES=$(bash .github/scripts/changes.sh)
           else
-            COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=format:"- %s")
+            CHANGES=$(bash .github/scripts/changes.sh "${LAST_TAG}..HEAD")
           fi
 
-          BREAKING=$(echo "$COMMITS" | grep -E "BREAKING CHANGE|^- feat!|^- fix!" || true)
-          FEATURES=$(echo "$COMMITS" | grep -E "^- feat" | grep -v "!" || true)
-          FIXES=$(echo "$COMMITS" | grep -E "^- fix" | grep -v "!" || true)
-          OTHER=$(echo "$COMMITS" | grep -vE "^- feat|^- fix|BREAKING" || true)
+          # The same list that decided the version decides the sections, so the
+          # changelog can never disagree with the number on the tag.
+          section() { awk -F'\t' -v kind="$1" '$1 == kind { print "- " $2 }' <<<"$CHANGES"; }
 
-          ENTRY="## [$VERSION] - $DATE\n"
+          BREAKING=$(section breaking)
+          FEATURES=$(section feat)
+          FIXES=$(section fix)
+          OTHER=$(section other)
+          DEPS=$(section deps)
 
-          if [ -n "$BREAKING" ]; then
-            ENTRY="${ENTRY}\n### Breaking Changes\n${BREAKING}\n"
-          fi
-          if [ -n "$FEATURES" ]; then
-            ENTRY="${ENTRY}\n### Features\n${FEATURES}\n"
-          fi
-          if [ -n "$FIXES" ]; then
-            ENTRY="${ENTRY}\n### Bug Fixes\n${FIXES}\n"
-          fi
-          if [ -n "$OTHER" ]; then
-            ENTRY="${ENTRY}\n### Other Changes\n${OTHER}\n"
-          fi
+          {
+            echo "## [$VERSION] - $DATE"
+            [ -n "$BREAKING" ] && printf '\n### Breaking Changes\n%s\n' "$BREAKING"
+            [ -n "$FEATURES" ] && printf '\n### Features\n%s\n' "$FEATURES"
+            [ -n "$FIXES" ]    && printf '\n### Bug Fixes\n%s\n' "$FIXES"
+            [ -n "$OTHER" ]    && printf '\n### Other Changes\n%s\n' "$OTHER"
+            [ -n "$DEPS" ]     && printf '\n### Dependencies\n%s\n' "$DEPS"
+            echo
+          } > .changelog-entry
 
-          if [ -f CHANGELOG.md ]; then
-            echo -e "${ENTRY}\n$(cat CHANGELOG.md)" > CHANGELOG.md
-          else
-            echo -e "# Changelog\n\n${ENTRY}" > CHANGELOG.md
-          fi
+          # Rebuilt rather than prepended to: the new section belongs under the
+          # document title, not above it.
+          {
+            echo "# Changelog"
+            echo
+            cat .changelog-entry
+            if [ -f CHANGELOG.md ]; then
+              awk 'found || index($0, "## [") == 1 { found = 1; print }' CHANGELOG.md
+            fi
+          } > CHANGELOG.next
+
+          mv CHANGELOG.next CHANGELOG.md
+          rm .changelog-entry
 
       - name: Commit version bump and changelog
+        if: steps.version.outputs.release == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -158,6 +159,7 @@ jobs:
           git push origin HEAD:stable
 
       - name: Create tag
+        if: steps.version.outputs.release == 'true'
         run: |
           git tag v${{ steps.version.outputs.next }}
           git push origin v${{ steps.version.outputs.next }}
@@ -165,6 +167,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: release
+    if: needs.release.outputs.release == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -221,6 +224,7 @@ jobs:
   github-release:
     name: Create GitHub Release
     needs: [release, build]
+    if: needs.release.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -260,6 +264,7 @@ jobs:
   publish:
     name: Publish to crates.io
     needs: [release, github-release]
+    if: needs.release.outputs.release == 'true'
     runs-on: ubuntu-latest
 
     steps:

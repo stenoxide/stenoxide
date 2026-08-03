@@ -5,7 +5,14 @@
 //! payload compression. Every type that holds key material implements
 //! `ZeroizeOnDrop`.
 //!
-//! Implemented in PROMPT 3.
+//! The layer is a one-way chain, and each stage narrows what the next one can
+//! do wrong:
+//!
+//! ```text
+//! password + phash --Argon2id--> MasterKey
+//!                  --HKDF-SHA3-512--> DerivedKeys { enc_key, nonce, stc_seed }
+//! plaintext --zstd--> compressed --XChaCha20-Poly1305--> ciphertext
+//! ```
 
 pub mod aead;
 pub mod expand;

@@ -55,6 +55,13 @@ and see every changed pixel, which no embedding scheme survives.
 (SRNet, YeNet and the like) against the stego image alone, without access to the
 original cover, and without the password.
 
+> **Read [OPSEC.md](OPSEC.md) before using this for anything that matters.**
+> The guarantees above hold under conditions this tool cannot enforce for you,
+> and one of them is absolute: **never use the same image and the same password
+> for two different messages.** The key and the nonce are both derived from that
+> pair, so reusing it breaks the encryption outright. There is no warning and no
+> recovery.
+
 ## Installation
 
 ### CLI

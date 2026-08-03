@@ -46,7 +46,7 @@
 #![deny(clippy::panic)]
 #![deny(missing_docs)]
 
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -381,6 +381,12 @@ fn container_capacity(image: &ImageBuffer) -> Option<usize> {
 fn terminal_renders_unicode() -> bool {
     #[cfg(windows)]
     {
+        // Imported here rather than at the top of the file: this is the only
+        // use of the trait, and it is behind a `cfg`. At module scope the
+        // import is unused on every other platform, which `-D warnings` turns
+        // into a failed build.
+        use std::io::IsTerminal;
+
         if io::stdout().is_terminal() {
             // 65001 is CP_UTF8. Read through the same call the console itself
             // is configured with rather than through an environment variable,

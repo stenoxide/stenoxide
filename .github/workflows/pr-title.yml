@@ -1,0 +1,30 @@
+name: Pull request title
+
+# Apart from the CI workflow on purpose. This has to re-run when the title is
+# edited, and `edited` fires on every change to the title or the body — folding
+# it into CI would rebuild and retest the whole workspace every time someone
+# reworded a paragraph. Worse, a skipped required check reads as a passing one,
+# so gating the test job on the event type would let an edit turn a red run
+# green.
+on:
+  pull_request:
+    branches: [main, stable]
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-title:
+    name: Pull request title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Conventional Commit title
+        env:
+          # Through the environment, never interpolated into the script body: a
+          # pull request title is text an outsider chooses, and `${{ }}` pastes
+          # it into the shell before bash ever sees it.
+          TITLE: ${{ github.event.pull_request.title }}
+        run: bash .github/scripts/check-title.sh "$TITLE"

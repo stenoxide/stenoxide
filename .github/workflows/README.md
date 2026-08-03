@@ -5,6 +5,19 @@ Two workflows govern everything that leaves this repository. Work lands on
 accumulated enough to release. `stable` is the published line, and nothing
 reaches crates.io without passing through a pull request into it.
 
+## Pull request title (`pr-title.yml`)
+
+Runs on every pull request targeting `main` or `stable`, and again whenever the
+title is edited. It rejects a title that is not a Conventional Commit and prints
+the accepted types with what each does to the version.
+
+It is a workflow of its own rather than a job inside CI because it has to react
+to `edited`, and that event fires on every change to the title or the body.
+Folding it into CI would retest the whole workspace each time someone reworded a
+paragraph — and gating the test job on the event type instead would be worse,
+since a skipped required check reads as a passing one and an edit could turn a
+red run green.
+
 ## CI (`ci.yml`)
 
 Runs on every pull request targeting `main` or `stable`. It is the gate: if any

@@ -1,18 +1,26 @@
 [package]
 name = "stenoxide-cli"
-description = "Command line interface for the stenoxide steganography system"
+description = "Command-line tool for hiding encrypted messages inside PNG images"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+exclude.workspace = true
+documentation = "https://docs.rs/stenoxide-cli"
+readme = "../README.md"
+keywords = ["steganography", "cryptography", "cli", "security"]
+categories = ["command-line-utilities", "cryptography"]
 
 [[bin]]
 name = "stenoxide"
 path = "src/main.rs"
 
 [dependencies]
-stenoxide-core = { path = "../stenoxide-core" }
+# The version requirement is what a published build resolves against: `path`
+# only exists inside this workspace and is dropped when the crate is packaged.
+stenoxide-core = { path = "../stenoxide-core", version = "0.1.0" }
 clap.workspace = true
 rpassword.workspace = true
 zeroize.workspace = true

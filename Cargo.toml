@@ -6,8 +6,16 @@ members = ["stenoxide-core", "stenoxide-cli"]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/stenoxide/stenoxide"
+homepage = "https://github.com/stenoxide/stenoxide"
+# The whole test tree is left out, not just the generated fixtures: the suite is
+# linked against a build of the crate with `test-utils` enabled, and the
+# dev-dependency that arranges it is a path dependency on this same package,
+# which publishing strips. Shipping tests that cannot compile is worse than
+# shipping none. `scripts` holds the steganalysis harness, which needs a Python
+# toolkit that is not part of the crate.
+exclude = ["tests/*", "scripts/*"]
 
 [workspace.dependencies]
 image = "0.25"

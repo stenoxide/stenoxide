@@ -1,11 +1,17 @@
 [package]
 name = "stenoxide-core"
-description = "Core steganography engine: image validation, cost analysis, cryptography and STC embedding"
+description = "Adaptive LSB steganography engine with HILL cost functions, STC embedding and an Argon2id + XChaCha20-Poly1305 cryptographic pipeline"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+exclude.workspace = true
+documentation = "https://docs.rs/stenoxide-core"
+readme = "README.md"
+keywords = ["steganography", "cryptography", "image", "security", "stego"]
+categories = ["cryptography", "multimedia::images"]
 
 [dependencies]
 image.workspace = true

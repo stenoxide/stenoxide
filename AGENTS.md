@@ -150,6 +150,44 @@ The `prompts/` directory is a private, gitignored scaffolding for the initial bu
 
 ---
 
+## README Maintenance
+
+The root `README.md` and `stenoxide-core/README.md` describe what the system
+*is* and how it behaves today. They are not a changelog and not a place to
+record work. Keep them true; otherwise leave them alone.
+
+**Update the README when, and only when, a change makes it wrong or incomplete
+for a reader who has never seen the code:**
+
+- Something it states is no longer true — an algorithm it names was replaced, a
+  parameter it quotes changed, a requirement was relaxed or tightened.
+- Something a user needs in order to use the project appeared or disappeared — a
+  subcommand, a flag, an installation step, a new crate, a supported format.
+- A claim in "Security model" stopped holding, or a new one has to be made.
+
+**Do not touch the README for:**
+
+- Internal refactors, renames of private items, module reorganisations.
+- Bug fixes, new tests, performance work, dependency bumps.
+- Anything the README does not already mention and that a user does not need to
+  know about.
+
+**How to edit it when an edit is warranted:**
+
+- Change the sentence that is now wrong, inside the section that already covers
+  the topic. Replace text; do not accumulate it next to what is already there.
+- Never add a "Changelog", "Recent changes", "What's new" or "Notes" section, and
+  never append a line per commit. The structure of the document is fixed; growth
+  is a defect, not a sign of maintenance.
+- If a change genuinely needs a section that does not exist, say so and add one
+  deliberately — that is a rare event, not a routine one.
+
+The test before editing: *does the README now say something false, or omit
+something a first-time user needs?* If the answer is no, the README is finished
+for that change.
+
+---
+
 ## Architecture Reference
 
 The system is composed of five layers. Each prompt implements one layer. Do not mix concerns across layers.

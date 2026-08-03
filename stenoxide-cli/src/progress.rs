@@ -12,10 +12,15 @@
 //!   along — is either public or already in the report it prints at the end.
 //!   Full progress, with a time estimate.
 //!
-//! - **`embed`** may report its stages. The work it does is a function of the
-//!   container's size and the payload's length, and both of those are printed
-//!   in the report at the end anyway. A stage name reveals nothing the finished
-//!   output does not.
+//! - **`embed`** would be allowed to report its stages: the work it does is a
+//!   function of the container's size and the payload's length, and both are
+//!   printed in the report at the end anyway, so naming a stage would reveal
+//!   nothing the finished output does not. It gets [`Activity`] all the same,
+//!   for a reason that is not about secrecy — `EmbedPipeline::embed` is one
+//!   opaque call with no point at which it reports having got anywhere. A
+//!   determinate bar would mean threading a callback through four layers of the
+//!   core, and a bar that guessed instead would be inventing the one number the
+//!   user would actually rely on.
 //!
 //! - **`extract`** may not. Its failures are deliberately indistinguishable: a
 //!   wrong password, an image carrying nothing and a damaged payload all print

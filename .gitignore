@@ -6,3 +6,10 @@ LIBSDC_PATH
 # Test fixtures are generated on demand by the integration suite, never
 # committed. See stenoxide-core/tests/support/mod.rs.
 stenoxide-core/tests/fixtures/
+
+# The steganalysis toolkit is installed outside the working tree and the
+# validation script works in a temporary directory. Neither belongs here, but
+# an interrupted run or an ALETHEIA_DIR pointed at the repository would leave
+# one behind. See scripts/README.md.
+scripts/aletheia_*/
+/tmp/

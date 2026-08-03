@@ -1,0 +1,8 @@
+# Shell scripts keep LF endings on every platform they are checked out on.
+#
+# Not a style preference. A carriage return at the end of the shebang line
+# becomes part of the interpreter path, and the kernel then looks for a program
+# named "bash\r" and does not find one. A checkout with autocrlf enabled would
+# produce exactly that, so the attribute is pinned here rather than left to
+# whatever each contributor has configured.
+*.sh text eol=lf

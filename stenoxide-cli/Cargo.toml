@@ -24,6 +24,7 @@ stenoxide-core = { path = "../stenoxide-core", version = "0.1.0" }
 clap.workspace = true
 rpassword.workspace = true
 zeroize.workspace = true
+indicatif.workspace = true
 
 [dev-dependencies]
 # The `test-utils` feature carries the container generator both suites of this
@@ -32,6 +33,9 @@ zeroize.workspace = true
 stenoxide-core = { path = "../stenoxide-core", features = ["test-utils"] }
 image.workspace = true
 tempfile.workspace = true
+# `in_memory` provides the terminal the progress tests render into. Enabled here
+# rather than in the dependency above so a release build carries none of it.
+indicatif = { workspace = true, features = ["in_memory"] }
 
 [features]
 default = []

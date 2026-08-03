@@ -8,8 +8,20 @@ reaches crates.io without passing through a pull request into it.
 ## Pull request title (`pr-title.yml`)
 
 Runs on every pull request targeting `main` or `stable`, and again whenever the
-title is edited. It rejects a title that is not a Conventional Commit and prints
-the accepted types with what each does to the version.
+title is edited. A title that is not a Conventional Commit is **rewritten, not
+rejected**: the workflow derives the right prefix from the changes the pull
+request carries and edits the title in place, leaving a note in the run summary.
+Its own edit fires `edited` once more, the title validates, and the check
+settles green.
+
+Repairing is only defensible because the title decides nothing. This repository
+squashes with the list of replaced commits in the body (see below), and the
+release job reads that list in preference to the subject — the title is
+documentation. The prefix comes from the same list, so a repaired title cannot
+describe the release wrongly.
+
+Pull requests from forks are rejected rather than repaired: their token is
+read-only, so there is nothing else the workflow can do.
 
 It is a workflow of its own rather than a job inside CI because it has to react
 to `edited`, and that event fires on every change to the title or the body.
@@ -17,6 +29,21 @@ Folding it into CI would retest the whole workspace each time someone reworded a
 paragraph — and gating the test job on the event type instead would be worse,
 since a skipped required check reads as a passing one and an edit could turn a
 red run green.
+
+### A repository setting this depends on
+
+*Settings → General → Pull Requests → Default commit message* for squash merging
+must stay at a value that includes the commit details. The API name is
+`squash_merge_commit_message`, and it must be `COMMIT_MESSAGES`:
+
+```sh
+gh api repos/OWNER/REPO --jq .squash_merge_commit_message
+```
+
+Set to `PR_BODY` or `BLANK` instead, a squashed merge lands with no record of the
+commits it replaced. The version would then be computed from the pull request
+title alone, the changelog would shrink to one line per merge, and rewriting a
+title would stop being a cosmetic act.
 
 ## CI (`ci.yml`)
 

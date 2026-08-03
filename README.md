@@ -76,9 +76,40 @@ cargo add stenoxide-core
 
 ## Usage
 
-Both subcommands read the password from the terminal with echo disabled. Neither
-the password nor the message is ever passed as an argument, so nothing sensitive
-reaches the shell history or the process table.
+`embed` and `extract` read the password from the terminal with echo disabled.
+Neither the password nor the message is ever passed as an argument, so nothing
+sensitive reaches the shell history or the process table. Both validate the
+container before asking for anything, so an unusable image is refused before you
+type a passphrase.
+
+### Scan
+
+Whether a photo can be used as a container is not something you can tell by
+looking at it, so ask:
+
+```sh
+stenoxide scan ./photos
+```
+
+The path may be a file, a directory or a glob pattern, and defaults to the
+working directory. `--recursive` descends into subdirectories, `--all` also
+lists the images that were rejected and why, and `--json` writes a document a
+script can parse instead of a listing.
+
+```text
+Scanning ./photos ...
+
+  ✓ photos/landscape.png         3840x2160   ~74.2 KB payload
+  ✗ photos/portrait.jpg          UnsupportedFormat
+  ✗ photos/logo.png              ImageTooSmall 400x400
+
+  * Estimated payload capacity after encryption overhead
+  Summary: 1 valid, 2 invalid (3 scanned)
+```
+
+The capacity shown is what the container admits after encryption. The message is
+compressed first, so ordinary text usually fits at two or three times that
+figure.
 
 ### Embed
 

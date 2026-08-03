@@ -30,3 +30,9 @@ pub mod crypto;
 pub mod image_io;
 pub mod pipeline;
 pub mod stego;
+
+// Container fixtures, shared by the test suites of both crates so that there is
+// one definition of "an image this system accepts". Compiled only under the
+// `test-utils` feature, which no release build turns on.
+#[cfg(feature = "test-utils")]
+pub mod test_support;

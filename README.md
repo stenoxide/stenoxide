@@ -127,9 +127,31 @@ terminal, so `--json` and redirected output are never touched by it.
 
 ### Embed
 
+The message is read from standard input, so it can be piped in:
+
 ```sh
 echo "secret message" | stenoxide embed --input photo.png --output stego.png
 ```
+
+Or typed, by running the command on its own. `embed` then says so and waits;
+finish the message with a line containing a single dot:
+
+```text
+$ stenoxide embed --input photo.png --output stego.png
+Password:
+Message to hide. It may span as many lines as you need.
+Finish with a line containing a single dot:  .
+Meet me at six.
+Bring the other half.
+.
+Read 38 bytes.
+```
+
+Typing it is the more private of the two: a message given to `echo` is a
+command line like any other and stays in the shell's history, while nothing
+typed here does. End of file — `Ctrl+D`, or `Ctrl+Z` then `Enter` on Windows —
+also ends the message, but the dot is what the prompt offers because
+PowerShell's line editor keeps `Ctrl+Z` for itself and never delivers it.
 
 ### Extract
 

@@ -18,7 +18,9 @@ sha3 = "0.10"
 # In 0.10 the XChaCha20-Poly1305 variant is part of the default surface;
 # the separate "xchacha20poly1305" feature only existed up to 0.9.
 chacha20poly1305 = "0.10"
-chacha20 = "0.9"
+# The `zeroize` feature makes the cipher wipe its internal state on drop; it is
+# not enabled by default.
+chacha20 = { version = "0.9", features = ["zeroize"] }
 zeroize = { version = "1.7", features = ["derive"] }
 rayon = "1.9"
 rand = "0.8"

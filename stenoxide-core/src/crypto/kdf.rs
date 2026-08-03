@@ -16,6 +16,8 @@ use std::fmt;
 use argon2::{Algorithm, Argon2, Params, Version};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::image_io::phash::PHashSalt;
+
 /// Argon2id memory cost, in kibibytes (128 MiB).
 const M_COST: u32 = 131_072;
 
@@ -27,31 +29,6 @@ const PARALLELISM: u32 = 2;
 
 /// Length of the derived master key, in bytes.
 const MASTER_KEY_LEN: usize = 32;
-
-/// Perceptual hash of the container image, used as the Argon2id salt.
-///
-/// # Temporary definition
-///
-/// TODO(PROMPT 2): this type belongs in [`crate::image_io::phash`], next to the
-/// code that computes it. It lives here because the key derivation layer is
-/// implemented before the perceptual hash module exists, and a trait signature
-/// cannot name a type that has not been declared. The blocker is purely one of
-/// ordering: once `phash.rs` provides the real implementation this stub is
-/// deleted and the import is repointed. The public surface (`new` and
-/// `as_bytes`) is fixed so that the swap touches no caller.
-pub struct PHashSalt([u8; 32]);
-
-impl PHashSalt {
-    /// Wraps the 32 bytes of a perceptual hash as a salt.
-    pub fn new(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
-    /// Borrows the salt bytes.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
 
 /// Every way password stretching can fail.
 #[derive(Debug)]

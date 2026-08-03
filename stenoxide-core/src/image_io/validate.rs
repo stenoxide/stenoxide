@@ -259,3 +259,264 @@ pub fn load_and_validate(path: &Path) -> Result<ImageBuffer, ValidationError> {
     let decoded = decode_png(verified)?;
     validate_no_jpeg_artifacts(decoded)
 }
+
+#[cfg(test)]
+mod tests {
+    // The crate-wide bans on panicking helpers reach into `cfg(test)` code as
+    // well. A test that cannot panic cannot fail, so they are lifted here and
+    // only here.
+    #![allow(clippy::expect_used)]
+    #![allow(clippy::panic)]
+
+    use super::*;
+
+    use image::{GrayAlphaImage, GrayImage, ImageFormat, Rgb, RgbImage, RgbaImage};
+    use tempfile::NamedTempFile;
+
+    use crate::image_io::buffer::CoverSource;
+
+    /// Side length of the throwaway containers built below.
+    ///
+    /// Exactly the minimum the size gate accepts, so a layout test never fails
+    /// for the wrong reason.
+    const SIDE: u32 = MIN_DIMENSION;
+
+    /// Twelve bytes, so that [`validate_magic_bytes`] gets past its length
+    /// guard and has to decide on the signature itself.
+    fn header(prefix: &[u8]) -> RawBytes {
+        let mut bytes = prefix.to_vec();
+        bytes.resize(MIN_HEADER_LEN.max(prefix.len()), 0);
+
+        RawBytes(bytes)
+    }
+
+    /// Writes a flat PNG of the given layout and hands back the file holding it.
+    ///
+    /// Flat rather than textured on purpose: this module's gates are about
+    /// format, geometry and block structure, none of which need content, and a
+    /// uniform image compresses to a few kilobytes instead of the tens of
+    /// megabytes a noise field of this size would cost. It scores zero on the
+    /// block detector, so it passes the final gate as well.
+    fn flat_png(color_space: ColorSpace) -> NamedTempFile {
+        let file = NamedTempFile::new().expect("temporary png file");
+
+        let saved = match color_space {
+            ColorSpace::Rgb8 => RgbImage::from_pixel(SIDE, SIDE, Rgb([90, 110, 130]))
+                .save_with_format(file.path(), ImageFormat::Png),
+            ColorSpace::Rgba8 => RgbaImage::from_pixel(SIDE, SIDE, image::Rgba([90, 110, 130, 255]))
+                .save_with_format(file.path(), ImageFormat::Png),
+            ColorSpace::Luma8 => GrayImage::from_pixel(SIDE, SIDE, image::Luma([110]))
+                .save_with_format(file.path(), ImageFormat::Png),
+            ColorSpace::Rgb16 => {
+                image::ImageBuffer::<Rgb<u16>, Vec<u16>>::from_pixel(
+                    SIDE,
+                    SIDE,
+                    Rgb([23_000, 28_000, 33_000]),
+                )
+                .save_with_format(file.path(), ImageFormat::Png)
+            }
+        };
+        saved.expect("a flat png must be writable");
+
+        file
+    }
+
+    /// A header too short to identify anything is not a PNG.
+    #[test]
+    fn a_truncated_header_is_not_a_png() {
+        let error = validate_magic_bytes(RawBytes(vec![0x89, 0x50, 0x4E]))
+            .map(|_| ())
+            .expect_err("three bytes cannot identify a format");
+
+        assert!(matches!(error, ValidationError::NotPng), "got: {error:?}");
+    }
+
+    /// The three formats the first gate names, and the one it accepts.
+    #[test]
+    fn the_magic_number_decides_the_format() {
+        let jpeg = validate_magic_bytes(header(&[0xFF, 0xD8, 0xFF]))
+            .map(|_| ())
+            .expect_err("a jpeg must be named as such");
+        assert!(
+            matches!(jpeg, ValidationError::JpegDetected),
+            "got: {jpeg:?}"
+        );
+
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(b"WEBP");
+        let webp = validate_magic_bytes(RawBytes(webp))
+            .map(|_| ())
+            .expect_err("a webp must be named as such");
+        assert!(
+            matches!(webp, ValidationError::WebpDetected),
+            "got: {webp:?}"
+        );
+
+        let unknown = validate_magic_bytes(header(b"GIF89a"))
+            .map(|_| ())
+            .expect_err("an unknown format must be refused");
+        assert!(
+            matches!(unknown, ValidationError::NotPng),
+            "got: {unknown:?}"
+        );
+
+        assert!(validate_magic_bytes(header(&PNG_MAGIC)).is_ok());
+    }
+
+    /// A file that is not there is an I/O failure, and the cause is preserved.
+    #[test]
+    fn a_missing_file_is_an_io_error() {
+        let error = load_and_validate(Path::new("no-such-container-image.png"))
+            .map(|_| ())
+            .expect_err("a path that does not exist must be refused");
+
+        assert!(matches!(error, ValidationError::IoError(_)), "got: {error:?}");
+
+        // The `source` chain is what lets a front-end print why the read
+        // failed without this layer having to flatten it into a string.
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    /// An honest PNG signature over bytes that are not a PNG stream.
+    ///
+    /// The complement of the magic-byte gate: the first transition passes and
+    /// the decoder is the one that has to refuse.
+    #[test]
+    fn a_corrupt_png_stream_is_a_decoding_error() {
+        let mut bytes = PNG_MAGIC.to_vec();
+        bytes.extend_from_slice(&[0x13; 64]);
+
+        let file = NamedTempFile::new().expect("temporary png file");
+        std::fs::write(file.path(), &bytes).expect("the corrupt file must be writable");
+
+        let error = load_and_validate(file.path())
+            .map(|_| ())
+            .expect_err("a malformed png stream must be refused");
+
+        assert!(
+            matches!(error, ValidationError::DecodingError(_)),
+            "got: {error:?}"
+        );
+    }
+
+    /// The size gate names the offending dimensions.
+    #[test]
+    fn an_undersized_container_is_refused() {
+        let file = NamedTempFile::new().expect("temporary png file");
+        RgbImage::from_pixel(100, 100, Rgb([10, 20, 30]))
+            .save_with_format(file.path(), ImageFormat::Png)
+            .expect("a small png must be writable");
+
+        let error = load_and_validate(file.path())
+            .map(|_| ())
+            .expect_err("a 100x100 container must be refused");
+
+        assert!(
+            matches!(
+                error,
+                ValidationError::ImageTooSmall {
+                    width: 100,
+                    height: 100,
+                    min: MIN_DIMENSION,
+                }
+            ),
+            "got: {error:?}"
+        );
+    }
+
+    /// Grayscale with an alpha channel is a layout the embedder cannot use.
+    #[test]
+    fn an_unsupported_layout_is_refused_by_name() {
+        let file = NamedTempFile::new().expect("temporary png file");
+        GrayAlphaImage::from_pixel(SIDE, SIDE, image::LumaA([110, 255]))
+            .save_with_format(file.path(), ImageFormat::Png)
+            .expect("a grayscale-alpha png must be writable");
+
+        let error = load_and_validate(file.path())
+            .map(|_| ())
+            .expect_err("grayscale with alpha must be refused");
+
+        match error {
+            ValidationError::UnsupportedColorSpace { found } => {
+                assert!(found.contains("La8"), "the layout must be named: {found}");
+            }
+            other => panic!("expected an unsupported layout, got: {other:?}"),
+        }
+    }
+
+    /// Each of the four accepted layouts decodes to the buffer length its own
+    /// `bytes_per_pixel` announces.
+    ///
+    /// The contract every layer above relies on: [`CoverSource::pixels`] must
+    /// hold exactly `pixel_count * bytes_per_pixel` bytes, and the 16-bit path
+    /// is the one where that is not obvious, because the decoder hands over
+    /// native `u16` samples that this module re-lays as byte pairs.
+    #[test]
+    fn every_supported_layout_decodes_to_its_own_stride() {
+        for expected in [
+            ColorSpace::Rgb8,
+            ColorSpace::Rgba8,
+            ColorSpace::Luma8,
+            ColorSpace::Rgb16,
+        ] {
+            let file = flat_png(expected);
+            let image = match load_and_validate(file.path()) {
+                Ok(image) => image,
+                Err(error) => panic!("a flat {expected:?} container must load: {error}"),
+            };
+
+            assert_eq!(image.color_space(), expected);
+            assert_eq!(image.dimensions(), (SIDE, SIDE));
+            assert_eq!(
+                image.pixels().len(),
+                image.pixel_count() * expected.bytes_per_pixel()
+            );
+        }
+    }
+
+    /// Every rejection says what is wrong in words a user can act on.
+    #[test]
+    fn every_rejection_explains_itself() {
+        let messages = [
+            ValidationError::IoError(std::io::Error::other("disk on fire")).to_string(),
+            ValidationError::JpegDetected.to_string(),
+            ValidationError::WebpDetected.to_string(),
+            ValidationError::NotPng.to_string(),
+            ValidationError::UnsupportedColorSpace {
+                found: "Rgba16".to_owned(),
+            }
+            .to_string(),
+            ValidationError::ImageTooSmall {
+                width: 10,
+                height: 20,
+                min: MIN_DIMENSION,
+            }
+            .to_string(),
+            ValidationError::DecodingError("truncated".to_owned()).to_string(),
+            ValidationError::JpegArtifactsDetected { ratio: 3.25 }.to_string(),
+        ];
+
+        for message in &messages {
+            assert!(!message.is_empty());
+        }
+
+        assert!(messages[1].contains("JPEG"));
+        assert!(messages[2].contains("WebP"));
+        assert!(messages[4].contains("Rgba16"));
+        assert!(messages[5].contains("10x20"));
+        assert!(messages[7].contains("3.25"));
+
+        // Only the I/O variant has an underlying cause to chain to.
+        assert!(std::error::Error::source(&ValidationError::NotPng).is_none());
+    }
+
+    /// The `From` shortcut the loader relies on to use the `?` operator.
+    #[test]
+    fn an_io_error_converts_into_a_validation_error() {
+        let converted =
+            ValidationError::from(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
+
+        assert!(matches!(converted, ValidationError::IoError(_)));
+    }
+}

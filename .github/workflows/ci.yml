@@ -37,6 +37,14 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace -- -D warnings
 
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      # A merge gate, not a report: a pull request that drops line coverage of
+      # the workspace below 90% fails here and does not land.
+      - name: Check coverage
+        run: cargo llvm-cov --workspace --fail-under-lines 90
+
       - name: Install cargo-audit
         if: github.base_ref == 'stable'
         run: cargo install cargo-audit --locked

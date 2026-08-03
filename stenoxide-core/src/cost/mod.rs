@@ -153,3 +153,63 @@ pub trait CostProvider {
     /// downstream, past the point where it can still be explained to the user.
     fn compute<'img>(&self, image: &'img ImageBuffer) -> Result<CostMap<'img>, Self::Error>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::image_io::buffer::ColorSpace;
+
+    /// A 4x3 map whose cost is the linear index of the pixel.
+    fn map(image: &ImageBuffer) -> CostMap<'_> {
+        let costs = (0..image.pixel_count()).map(|index| index as f32).collect();
+
+        CostMap::new(image, costs)
+    }
+
+    /// A container of the geometry the map above is built against.
+    fn image() -> ImageBuffer {
+        ImageBuffer::new(vec![0u8; 4 * 3], 4, 3, ColorSpace::Luma8)
+    }
+
+    /// The map takes its geometry from the image, never from its caller.
+    #[test]
+    fn the_map_reports_the_geometry_of_its_source() {
+        let image = image();
+        let map = map(&image);
+
+        assert_eq!(map.dimensions(), image.dimensions());
+        assert_eq!(map.pixel_count(), image.pixel_count());
+        assert_eq!(map.costs().len(), image.pixel_count());
+    }
+
+    /// Coordinate access, in its total and its panicking form.
+    #[test]
+    fn coordinates_address_the_map_row_by_row() {
+        let image = image();
+        let map = map(&image);
+
+        assert_eq!(map.get(0, 0), Some(0.0));
+        assert_eq!(map.get(3, 0), Some(3.0));
+        assert_eq!(map.get(1, 2), Some(9.0));
+        assert_eq!(map[(1, 2)], 9.0);
+
+        // Out of range on either axis is `None` rather than a wrapped lookup
+        // into the next row.
+        assert_eq!(map.get(4, 0), None);
+        assert_eq!(map.get(0, 3), None);
+    }
+
+    /// The debug form prints the geometry and the size, never several million
+    /// floats.
+    #[test]
+    fn the_debug_form_is_a_summary() {
+        let image = image();
+        let rendered = format!("{:?}", map(&image));
+
+        assert!(rendered.contains("width: 4"), "got: {rendered}");
+        assert!(rendered.contains("height: 3"), "got: {rendered}");
+        assert!(rendered.contains("costs: 12"), "got: {rendered}");
+        assert!(!rendered.contains("0.0"), "got: {rendered}");
+    }
+}

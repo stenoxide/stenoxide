@@ -273,3 +273,202 @@ pub(crate) fn write_png(image: &ImageBuffer, path: &Path) -> Result<(), OutputEr
         .save_with_format(path, ImageFormat::Png)
         .map_err(|err| OutputError::EncodingFailed(err.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    // The crate-wide bans on panicking helpers reach into `cfg(test)` code as
+    // well. A test that cannot panic cannot fail, so they are lifted here and
+    // only here.
+    #![allow(clippy::expect_used)]
+    #![allow(clippy::panic)]
+
+    use super::*;
+
+    use tempfile::NamedTempFile;
+
+    /// Width of the throwaway containers below, in pixels.
+    const WIDTH: u32 = 5;
+
+    /// Height of the throwaway containers below, in pixels.
+    const HEIGHT: u32 = 4;
+
+    /// A container whose carrier byte is the index of its pixel.
+    ///
+    /// Every other byte of every pixel is a value the carrier never takes, so a
+    /// write into the wrong plane is visible rather than plausible.
+    fn container(color_space: ColorSpace) -> ImageBuffer {
+        let stride = color_space.bytes_per_pixel();
+        let pixel_count = (WIDTH * HEIGHT) as usize;
+
+        let pixels = (0..pixel_count * stride)
+            .map(|offset| {
+                if offset % stride == 0 {
+                    (offset / stride) as u8
+                } else {
+                    0xEE
+                }
+            })
+            .collect();
+
+        ImageBuffer::new(pixels, WIDTH, HEIGHT, color_space)
+    }
+
+    /// The boundary is a constant, and it is clamped rather than allowed to run
+    /// off the end of a short container.
+    #[test]
+    fn the_frame_is_cut_at_a_constant_boundary() {
+        let long: Vec<u8> = vec![0; HEADER_POSITIONS + 17];
+        let (header, payload) = split_regions(&long);
+        assert_eq!(header.len(), HEADER_POSITIONS);
+        assert_eq!(payload.len(), 17);
+
+        let mut short = vec![0u8; 9];
+        let (header, payload) = split_regions_mut(&mut short);
+        assert_eq!(header.len(), 9);
+        assert!(payload.is_empty());
+    }
+
+    /// Gathering and applying are inverses, and they address the carrier byte
+    /// of the permuted pixel.
+    #[test]
+    fn cover_symbols_round_trip_through_the_permutation() {
+        for color_space in [
+            ColorSpace::Rgb8,
+            ColorSpace::Rgba8,
+            ColorSpace::Luma8,
+            ColorSpace::Rgb16,
+        ] {
+            let mut image = container(color_space);
+            let permutation = vec![3usize, 0, 7, 1];
+
+            let gathered = gather_cover_symbols(&image, &permutation);
+            assert_eq!(gathered, vec![3u8, 0, 7, 1], "layout {color_space:?}");
+
+            let written: Vec<u8> = gathered.iter().map(|symbol| symbol ^ 1).collect();
+            apply_cover_symbols(&mut image, &permutation, &written);
+
+            assert_eq!(
+                gather_cover_symbols(&image, &permutation),
+                written,
+                "layout {color_space:?}"
+            );
+
+            // Nothing but the carrier byte was touched.
+            let stride = color_space.bytes_per_pixel();
+            assert!(image
+                .pixels()
+                .iter()
+                .enumerate()
+                .filter(|(offset, _)| offset % stride != 0)
+                .all(|(_, &sample)| sample == 0xEE));
+        }
+    }
+
+    /// A permutation entry outside the container reads as a zero sample and
+    /// writes nowhere, rather than indexing off the end.
+    #[test]
+    fn positions_outside_the_container_are_inert() {
+        let mut image = container(ColorSpace::Rgb8);
+        let permutation = vec![0usize, 9_999];
+
+        assert_eq!(gather_cover_symbols(&image, &permutation), vec![0u8, 0]);
+
+        let before = image.pixels().to_vec();
+        apply_cover_symbols(&mut image, &permutation, &[0, 42]);
+
+        // The first position was rewritten with the value it already had, and
+        // the second wrote nothing at all.
+        assert_eq!(image.pixels(), before.as_slice());
+    }
+
+    /// Costs are reordered into embedding order, and an entry with no cost of
+    /// its own reads as an unusable position rather than a free one.
+    #[test]
+    fn costs_follow_the_permutation() {
+        let costs = [0.5f32, 1.5, 2.5, 3.5];
+
+        assert_eq!(
+            reorder_costs(&costs, &[2, 0, 3, 1]),
+            vec![2.5f32, 0.5, 3.5, 1.5]
+        );
+        assert_eq!(reorder_costs(&costs, &[9]), vec![0.0f32]);
+    }
+
+    /// The length header is a big-endian `u32`, and it round-trips.
+    #[test]
+    fn the_length_header_round_trips() {
+        let header = encode_length_header(0x0102_0304).expect("a small length must encode");
+        assert_eq!(header, [0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(decode_length_header(&header), Some(0x0102_0304));
+
+        // Trailing bytes beyond the header are ignored.
+        assert_eq!(decode_length_header(&[0, 0, 0, 7, 9, 9]), Some(7));
+
+        // Fewer bytes than the header needs decodes to nothing.
+        assert_eq!(decode_length_header(&[0, 0, 7]), None);
+    }
+
+    /// A length no `u32` can hold is reported rather than truncated.
+    #[test]
+    fn an_unrepresentable_length_does_not_encode() {
+        assert!(encode_length_header(u32::MAX as usize).is_some());
+        assert!(encode_length_header(u32::MAX as usize + 1).is_none());
+    }
+
+    /// Every layout is written back as a PNG that decodes to the samples it was
+    /// given.
+    #[test]
+    fn every_layout_survives_a_write_and_a_read() {
+        for color_space in [
+            ColorSpace::Rgb8,
+            ColorSpace::Rgba8,
+            ColorSpace::Luma8,
+            ColorSpace::Rgb16,
+        ] {
+            let image = container(color_space);
+            let file = NamedTempFile::new().expect("temporary stego file");
+
+            if let Err(error) = write_png(&image, file.path()) {
+                panic!("a {color_space:?} container must be writable: {error}");
+            }
+
+            // The format is forced rather than inferred, so a temporary file
+            // whose extension says nothing still holds a PNG.
+            let bytes = std::fs::read(file.path()).expect("the written file must be readable");
+            assert_eq!(&bytes[..4], &[0x89, b'P', b'N', b'G']);
+
+            let decoded = image::load_from_memory_with_format(&bytes, ImageFormat::Png)
+                .expect("the written png must decode");
+            assert_eq!(decoded.width(), WIDTH);
+            assert_eq!(decoded.height(), HEIGHT);
+        }
+    }
+
+    /// A buffer that does not match the geometry it claims is refused rather
+    /// than written as a file the caller would believe in.
+    #[test]
+    fn a_buffer_that_belies_its_geometry_is_refused() {
+        let image = ImageBuffer::new(vec![0u8; 5], WIDTH, HEIGHT, ColorSpace::Rgb8);
+        let file = NamedTempFile::new().expect("temporary stego file");
+
+        let error = write_png(&image, file.path())
+            .expect_err("a short buffer must not be encoded");
+
+        assert!(matches!(error, OutputError::MalformedBuffer), "got: {error:?}");
+    }
+
+    /// A path that cannot be written is reported as an encoding failure.
+    #[test]
+    fn an_unwritable_path_is_reported() {
+        let image = container(ColorSpace::Rgb8);
+        let directory = tempfile::tempdir().expect("temporary directory");
+
+        let error = write_png(&image, &directory.path().join("no-such-dir").join("out.png"))
+            .expect_err("a path under a missing directory must fail");
+
+        assert!(
+            matches!(error, OutputError::EncodingFailed(_)),
+            "got: {error:?}"
+        );
+    }
+}

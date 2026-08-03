@@ -514,3 +514,205 @@ fn validate(costs: &[f32], width: usize, height: usize) -> Result<(), CostError>
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    // The crate-wide bans on panicking helpers reach into `cfg(test)` code as
+    // well. A test that cannot panic cannot fail, so they are lifted here and
+    // only here.
+    #![allow(clippy::expect_used)]
+    #![allow(clippy::panic)]
+
+    use super::*;
+
+    use rand::rngs::StdRng;
+    use rand::{RngExt, SeedableRng};
+
+    use crate::image_io::buffer::ColorSpace;
+
+    /// Side length of the synthetic containers below, in pixels.
+    const SIDE: u32 = 64;
+
+    /// Pixels of a container carrying photographic grain and nothing else.
+    ///
+    /// The amplitude is what decides the verdict, and it is the only thing
+    /// these tests vary: grain of a few levels leaves the smoothed residual
+    /// around seven, i.e. a cost around `0.15`, which clears the texture floor
+    /// of `0.10`. Full-range noise leaves it two orders of magnitude higher and
+    /// the reciprocal falls under the floor, which is the case the third gate
+    /// refuses.
+    fn grainy(seed: u64, amplitude: i16, channels: usize) -> Vec<u8> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let samples = (SIDE * SIDE) as usize * channels;
+
+        (0..samples)
+            .map(|_| (128 + rng.random_range(-amplitude..=amplitude)).clamp(0, 255) as u8)
+            .collect()
+    }
+
+    /// Reflection continues the image with its own content.
+    #[test]
+    fn coordinates_are_reflected_rather_than_padded() {
+        assert_eq!(reflect(0, 10), 0);
+        assert_eq!(reflect(9, 10), 9);
+        assert_eq!(reflect(-1, 10), 1);
+        assert_eq!(reflect(10, 10), 8);
+
+        // Far outside the image: the fold is periodic, so no offset can walk
+        // off the end of a plane however wide the kernel is.
+        assert!(reflect(1_000, 10) < 10);
+        assert!(reflect(-1_000, 10) < 10);
+
+        // A degenerate axis has exactly one coordinate to fold onto.
+        assert_eq!(reflect(7, 1), 0);
+        assert_eq!(reflect(-7, 0), 0);
+    }
+
+    /// The taps are normalised, so the filter preserves the level of its input.
+    #[test]
+    fn the_gaussian_taps_sum_to_one() {
+        for sigma in [1.0f32, 1.5] {
+            let taps = gaussian_kernel(sigma);
+
+            // Radius `ceil(2 sigma)`: five taps at 1.0 and seven at 1.5, which
+            // are the 5x5 and 7x7 filters the model calls for.
+            assert_eq!(taps.len(), 2 * (2.0 * sigma).ceil() as usize + 1);
+
+            let sum: f32 = taps.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-5, "taps for {sigma} summed to {sum}");
+
+            // Symmetric about the centre, which is what keeps the filter from
+            // shifting the residual sideways.
+            assert_eq!(taps.first(), taps.last());
+        }
+    }
+
+    /// Quantiles are taken by nearest rank, and an empty sample has none.
+    #[test]
+    fn quantiles_are_read_by_nearest_rank() {
+        let sorted: Vec<f32> = (0..100).map(|value| value as f32).collect();
+
+        assert_eq!(percentile(&sorted, 0.0), 0.0);
+        assert_eq!(percentile(&sorted, 0.05), 4.0);
+        assert_eq!(percentile(&sorted, 0.95), 94.0);
+        assert_eq!(percentile(&sorted, 1.0), 99.0);
+
+        assert_eq!(percentile(&[], 0.5), 0.0);
+    }
+
+    /// Smooth regions are 4-connected: a corner contact does not join two of
+    /// them.
+    #[test]
+    fn smooth_regions_do_not_merge_across_a_corner() {
+        // Two 2x2 cheap blocks touching only at the centre of a 4x4 map.
+        let expensive = 10.0f32;
+        let cheap = 0.0f32;
+        let costs = vec![
+            cheap, cheap, expensive, expensive, //
+            cheap, cheap, expensive, expensive, //
+            expensive, expensive, cheap, cheap, //
+            expensive, expensive, cheap, cheap,
+        ];
+
+        assert_eq!(largest_smooth_region(&costs, 4, 4, 1.0), 4);
+
+        // The same population in one piece, to show the count is of a region
+        // and not of the whole smooth population.
+        assert_eq!(largest_smooth_region(&[cheap; 16], 4, 4, 1.0), 16);
+
+        // A degenerate geometry has no region to find.
+        assert_eq!(largest_smooth_region(&costs, 0, 0, 1.0), 0);
+    }
+
+    /// An image with no pixels is refused rather than measured.
+    #[test]
+    fn an_empty_cost_map_has_no_texture() {
+        let error = validate(&[], 0, 0)
+            .map(|_| ())
+            .expect_err("a map with no pixels must be refused");
+
+        assert!(
+            matches!(error, CostError::InsufficientGlobalTexture),
+            "got: {error:?}"
+        );
+    }
+
+    /// A grainy container is accepted, and its map covers every pixel.
+    #[test]
+    fn a_grainy_container_produces_a_usable_map() {
+        let image = ImageBuffer::new(grainy(1, 3, 3), SIDE, SIDE, ColorSpace::Rgb8);
+
+        let map = match HillCostProvider::new().compute(&image) {
+            Ok(map) => map,
+            Err(error) => panic!("photographic grain must be usable: {error}"),
+        };
+
+        assert_eq!(map.pixel_count(), image.pixel_count());
+        assert_eq!(map.costs().len(), image.pixel_count());
+        assert!(map.costs().iter().all(|cost| cost.is_finite() && *cost > 0.0));
+    }
+
+    /// A container that is high-energy everywhere has no textured region to
+    /// prefer, and is refused rather than used badly.
+    #[test]
+    fn a_container_of_pure_noise_is_refused() {
+        let image = ImageBuffer::new(grainy(2, 127, 3), SIDE, SIDE, ColorSpace::Rgb8);
+
+        let error = HillCostProvider::new()
+            .compute(&image)
+            .map(|_| ())
+            .expect_err("full-range noise must be refused");
+
+        assert!(
+            matches!(error, CostError::InsufficientGlobalTexture),
+            "got: {error:?}"
+        );
+    }
+
+    /// Colour containers pay the red-channel penalty; grayscale ones have no
+    /// red plane to protect and do not.
+    #[test]
+    fn the_red_channel_penalty_applies_only_to_colour() {
+        let pixel_count = (SIDE * SIDE) as usize;
+        let rgb = grainy(3, 3, 3);
+
+        // The grayscale twin is built from the colour image's own luma plane
+        // rather than from the samples that produced it. Everything the model
+        // reads is then identical between the two by construction, so the only
+        // thing left to differ is the penalty.
+        let luma: Vec<u8> = luminance_plane(&rgb, pixel_count, ColorSpace::Rgb8)
+            .into_iter()
+            .map(|level| level as u8)
+            .collect();
+
+        let colour_image = ImageBuffer::new(rgb, SIDE, SIDE, ColorSpace::Rgb8);
+        let gray_image = ImageBuffer::new(luma, SIDE, SIDE, ColorSpace::Luma8);
+
+        let provider = HillCostProvider::new();
+        let colour = provider.compute(&colour_image).expect("grain must be usable");
+        let gray = provider.compute(&gray_image).expect("grain must be usable");
+
+        for (index, (with, without)) in colour.costs().iter().zip(gray.costs()).enumerate() {
+            let ratio = with / without;
+            assert!(
+                (ratio - RED_CHANNEL_PENALTY).abs() < 1e-4,
+                "pixel {index} cost {ratio} times as much in colour as in grayscale"
+            );
+        }
+    }
+
+    /// Every refusal tells the user what kind of container to reach for
+    /// instead.
+    #[test]
+    fn every_refusal_explains_itself() {
+        let excessive = CostError::ExcessiveSmoothRegions { ratio: 0.42 }.to_string();
+        assert!(excessive.contains("42.0%"), "got: {excessive}");
+
+        let region = CostError::LargeSmoothRegion { size: 12_345 }.to_string();
+        assert!(region.contains("12345"), "got: {region}");
+
+        assert!(CostError::InsufficientGlobalTexture
+            .to_string()
+            .contains("detail"));
+    }
+}
+

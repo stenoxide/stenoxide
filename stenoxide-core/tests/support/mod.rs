@@ -44,6 +44,8 @@ use image::codecs::jpeg::JpegEncoder;
 use image::{ExtendedColorType, ImageFormat, RgbImage};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
+use stenoxide_core::image_io::phash::compute_stable_phash;
+use stenoxide_core::image_io::validate::load_and_validate;
 
 /// Side length of the covers, in pixels.
 ///
@@ -91,6 +93,19 @@ const GRAIN_SIGMA: f32 = 2.0;
 /// bit a margin of some `42` units: eight times the threshold, and eight orders
 /// of magnitude above what embedding perturbs a thumbnail sample by.
 const COVER_SEED: u64 = 337;
+
+/// First candidate seed of the second cover fixture.
+///
+/// Two covers are needed by the tests that show a key is unique to the image it
+/// was derived from, and the second one has to clear the same stability gate as
+/// the first. Acceptance is close to a coin toss on an arbitrary seed — see
+/// [`COVER_SEED`] — so [`stable_cover`] searches upwards from here rather than
+/// pinning a literal. This value is the first of its run that passes, which
+/// makes the search cost one candidate on a build that has not drifted.
+const ALTERNATIVE_COVER_SEED: u64 = 1_000;
+
+/// Candidates [`stable_cover`] will try before giving up.
+const MAX_COVER_CANDIDATES: u64 = 32;
 
 /// Seed of the photographic content behind the disguised JPEG.
 const PHOTO_SEED: u64 = 0x4A50_4547_5F41_5350;
@@ -151,6 +166,18 @@ pub fn jpeg_as_png() -> PathBuf {
     fixtures_dir().join("jpeg_as_png.png")
 }
 
+/// A second textured cover, indistinguishable from the first in every property
+/// the gates measure and different in every sample.
+///
+/// What it is for: the salt is the container's perceptual hash, so the same
+/// password applied to two different images must produce two different keys.
+/// Showing that needs a second image that is a legitimate container in its own
+/// right — anything the loader would have refused would prove nothing.
+pub fn alternative_cover() -> PathBuf {
+    ensure_fixtures();
+    fixtures_dir().join("texture_alternative.png")
+}
+
 /// Builds every fixture, once.
 ///
 /// Idempotent across threads through [`Once`], and re-run from scratch on every
@@ -175,7 +202,98 @@ pub fn ensure_fixtures() {
         laundered_jpeg()
             .save_with_format(dir.join("jpeg_as_png.png"), ImageFormat::Png)
             .expect("disguised jpeg should be writable");
+
+        stable_cover(ALTERNATIVE_COVER_SEED)
+            .save_with_format(dir.join("texture_alternative.png"), ImageFormat::Png)
+            .expect("second cover should be writable");
     });
+}
+
+/// The first cover at or after `seed` whose perceptual hash is reproducible.
+///
+/// The gate compares each of the 64 AC coefficients against their median, and
+/// the two central ones are always equidistant from it: the image is accepted
+/// exactly when the gap between them clears twice the stability threshold. For
+/// a field of this amplitude that gap averages a few tens of units, which makes
+/// acceptance close to a coin toss and a literal seed a brittle thing to pin.
+///
+/// Candidates are screened through the public API — write, load, hash — because
+/// that is the only way an external test can ask this question, and the answer
+/// has to be the same one the pipeline will give.
+fn stable_cover(seed: u64) -> RgbImage {
+    let scratch = tempfile::Builder::new()
+        .suffix(".png")
+        .tempfile()
+        .expect("scratch file should be creatable");
+
+    for candidate in seed..seed + MAX_COVER_CANDIDATES {
+        let image = cover_image(candidate, COVER_SIDE);
+        image
+            .save_with_format(scratch.path(), ImageFormat::Png)
+            .expect("candidate cover should be writable");
+
+        let accepted = load_and_validate(scratch.path())
+            .map(|loaded| compute_stable_phash(&loaded).is_ok())
+            .unwrap_or(false);
+
+        if accepted {
+            return image;
+        }
+    }
+
+    panic!("no stable cover found in {MAX_COVER_CANDIDATES} candidates from seed {seed}")
+}
+
+/// Writes a file whose magic number identifies it as a WebP.
+///
+/// The bytes after the twelve-byte header are never read: the format gate
+/// refuses the file before any of it reaches a decoder.
+pub fn write_webp_header(path: &Path) {
+    let mut bytes = b"RIFF".to_vec();
+    bytes.extend_from_slice(&[0x20, 0, 0, 0]);
+    bytes.extend_from_slice(b"WEBPVP8 ");
+
+    std::fs::write(path, bytes).expect("webp header should be writable");
+}
+
+/// Writes bytes that are not any format the loader can name.
+pub fn write_unknown_format(path: &Path) {
+    std::fs::write(path, b"not an image, not a format, just bytes")
+        .expect("unknown format should be writable");
+}
+
+/// Writes an honest PNG signature over a stream that is not a PNG.
+///
+/// The complement of [`write_unknown_format`]: the format gate passes and the
+/// decoder is the one that has to refuse.
+pub fn write_corrupt_png(path: &Path) {
+    let mut bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend_from_slice(&[0x42; 128]);
+
+    std::fs::write(path, bytes).expect("corrupt png should be writable");
+}
+
+/// Writes a container of the right size in a pixel layout the embedder cannot
+/// use.
+///
+/// Grayscale with an alpha channel. Flat rather than textured because nothing
+/// past the layout check is reached, and a uniform image of this size costs a
+/// few kilobytes instead of several megabytes.
+pub fn write_grayscale_alpha_png(path: &Path) {
+    image::GrayAlphaImage::from_pixel(COVER_SIDE, COVER_SIDE, image::LumaA([110, 255]))
+        .save_with_format(path, ImageFormat::Png)
+        .expect("grayscale-alpha png should be writable");
+}
+
+/// Writes a container of the right size with no texture anywhere.
+///
+/// Passes every gate of layer 1 — it is a PNG, it is large enough, and a
+/// uniform image carries no block structure — and fails the first thing that
+/// asks anything of its content.
+pub fn write_flat_png(path: &Path) {
+    RgbImage::from_pixel(COVER_SIDE, COVER_SIDE, image::Rgb([128, 128, 128]))
+        .save_with_format(path, ImageFormat::Png)
+        .expect("flat png should be writable");
 }
 
 /// A deterministic byte string that Zstandard cannot shrink.

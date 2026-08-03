@@ -339,3 +339,125 @@ pub fn detect_jpeg_artifacts(
 
     pooled.ratio().filter(|&ratio| ratio > ARTIFACT_THRESHOLD)
 }
+
+#[cfg(test)]
+mod tests {
+    // The crate-wide ban on panicking helpers reaches into `cfg(test)` code as
+    // well. A test that cannot panic cannot fail, so it is lifted here and only
+    // here.
+    #![allow(clippy::panic)]
+
+    use super::*;
+
+    use rand::rngs::StdRng;
+    use rand::{RngExt, SeedableRng};
+
+    /// Side length of the synthetic images below, in pixels.
+    ///
+    /// Eight blocks each way: enough that the sampler has a population to draw
+    /// from, small enough that a test costs nothing.
+    const SIDE: u32 = 64;
+
+    /// A grayscale image built by a function of the coordinates.
+    fn image_from<F: Fn(usize, usize) -> u8>(side: u32, level: F) -> Vec<u8> {
+        let side = side as usize;
+
+        (0..side * side)
+            .map(|index| level(index % side, index / side))
+            .collect()
+    }
+
+    /// Uncorrelated noise: no position in the 8x8 grid is privileged.
+    fn clean_image(seed: u64) -> Vec<u8> {
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        (0..(SIDE * SIDE) as usize).map(|_| rng.random()).collect()
+    }
+
+    /// The luma plane is the image itself for a grayscale layout.
+    #[test]
+    fn the_luma_plane_reproduces_a_grayscale_image() {
+        let pixels = image_from(4, |x, y| (x * 4 + y) as u8);
+        let plane = luminance_plane(&pixels, 16, ColorSpace::Luma8);
+
+        assert_eq!(plane.len(), 16);
+        for (index, value) in plane.iter().enumerate() {
+            assert_eq!(*value, pixels[index] as f32);
+        }
+    }
+
+    /// The sampling seed is a function of the image, so a verdict can be
+    /// reproduced on exactly the blocks that produced it.
+    #[test]
+    fn the_sampling_seed_follows_the_image() {
+        let first = clean_image(1);
+        let second = clean_image(2);
+
+        assert_eq!(sampling_seed(&first), sampling_seed(&first));
+        assert_ne!(sampling_seed(&first), sampling_seed(&second));
+    }
+
+    /// A ratio of two means needs both populations to be non-empty.
+    #[test]
+    fn an_empty_population_yields_no_ratio() {
+        assert!(StepEnergies::default().ratio().is_none());
+
+        let boundary_only = StepEnergies {
+            boundary_sum: 10.0,
+            boundary_pairs: 4,
+            interior_sum: 0.0,
+            interior_pairs: 0,
+        };
+        assert!(boundary_only.ratio().is_none());
+    }
+
+    /// An image whose steps do not care about the grid is reported clean.
+    #[test]
+    fn uncorrelated_noise_shows_no_block_structure() {
+        assert_eq!(
+            detect_jpeg_artifacts(&clean_image(3), SIDE, SIDE, ColorSpace::Luma8),
+            None
+        );
+    }
+
+    /// An image built as constant 8x8 tiles is the block structure the detector
+    /// exists to find: every step it shows sits on a grid line.
+    #[test]
+    fn tiled_content_is_reported_as_blocking() {
+        let tiled = image_from(SIDE, |x, y| {
+            if (x / 8 + y / 8) % 2 == 0 {
+                100
+            } else {
+                160
+            }
+        });
+
+        match detect_jpeg_artifacts(&tiled, SIDE, SIDE, ColorSpace::Luma8) {
+            Some(ratio) => assert!(ratio > ARTIFACT_THRESHOLD, "ratio was {ratio}"),
+            None => panic!("a tiled image must be reported as blocking"),
+        }
+    }
+
+    /// Nothing to measure is answered with "clean" rather than with a number
+    /// that was never computed.
+    #[test]
+    fn there_is_no_verdict_without_a_complete_block() {
+        // No pixels at all.
+        assert_eq!(
+            detect_jpeg_artifacts(&[], 0, 0, ColorSpace::Rgb8),
+            None
+        );
+
+        // A buffer shorter than the geometry it claims.
+        assert_eq!(
+            detect_jpeg_artifacts(&[0u8; 10], SIDE, SIDE, ColorSpace::Luma8),
+            None
+        );
+
+        // Large enough to fill its buffer, too small to hold one 8x8 block.
+        assert_eq!(
+            detect_jpeg_artifacts(&[0u8; 16], 4, 4, ColorSpace::Luma8),
+            None
+        );
+    }
+}

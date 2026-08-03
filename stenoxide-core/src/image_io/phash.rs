@@ -580,3 +580,322 @@ pub(crate) fn recover_phash_salt(
         (None, None) => Err(PHashError::RecoveryFailed),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // The crate-wide bans on panicking helpers reach into `cfg(test)` code as
+    // well. A test that cannot panic cannot fail, so they are lifted here and
+    // only here.
+    #![allow(clippy::expect_used)]
+    #![allow(clippy::panic)]
+
+    use super::*;
+
+    use rand::rngs::StdRng;
+    use rand::{RngExt, SeedableRng};
+
+    use crate::crypto::aead::{compress_and_encrypt, XChaCha20Poly1305Cipher};
+    use crate::crypto::kdf::{Argon2Kdf, MasterKey};
+
+    /// Side length of the synthetic containers below.
+    ///
+    /// Exactly the thumbnail size, so the resize step is the identity and the
+    /// DCT reads the samples these tests wrote. Building the hash out of a
+    /// multi-megapixel image instead would test the resampler, not the filter.
+    const SIDE: u32 = PHASH_THUMBNAIL_SIZE as u32;
+
+    /// The password the recovery tests stretch.
+    const PASSWORD: &[u8] = b"a-container-passphrase";
+
+    /// A square of uncorrelated colour noise.
+    ///
+    /// White noise spreads the 64 AC coefficients over a range of some
+    /// thousands of units, which is three orders of magnitude above the `5.0`
+    /// stability margin — so the hash of such an image is reproducible for
+    /// almost any seed.
+    fn noise_image(seed: u64) -> ImageBuffer {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let pixel_count = (SIDE * SIDE) as usize;
+        let pixels = (0..pixel_count * 3).map(|_| rng.random()).collect();
+
+        ImageBuffer::new(pixels, SIDE, SIDE, ColorSpace::Rgb8)
+    }
+
+    /// The first noise square at or after `seed` whose hash is reproducible.
+    ///
+    /// Almost every seed produces one, but not quite every seed: the two
+    /// central AC coefficients are what the verdict turns on, and they land
+    /// within `2 * DELTA_MIN` of each other often enough that pinning a
+    /// literal seed would make these tests brittle for no reason.
+    fn stable_noise_image(seed: u64) -> ImageBuffer {
+        match (seed..seed + 64).map(noise_image).find(|image| {
+            compute_hash_bits(image).unstable_indices().is_empty()
+        }) {
+            Some(image) => image,
+            None => panic!("no stable container in sixty-four candidates from {seed}"),
+        }
+    }
+
+    /// A container with no structure at all, and therefore no usable hash.
+    fn flat_image() -> ImageBuffer {
+        let pixel_count = (SIDE * SIDE) as usize;
+
+        ImageBuffer::new(vec![128u8; pixel_count * 3], SIDE, SIDE, ColorSpace::Rgb8)
+    }
+
+    /// Sixty-four bytes of ciphertext produced under the keys of `bits`.
+    ///
+    /// The head of a real payload: compressed with Zstandard and then
+    /// encrypted, which is exactly what [`prefix_matches_key`] is written to
+    /// recognise.
+    fn ciphertext_prefix_for(bits: &[bool; N_HASH_BITS]) -> Vec<u8> {
+        let salt = salt_from_bits(bits);
+        let master_key = Argon2Kdf::low_cost_for_tests()
+            .derive(PASSWORD, &salt)
+            .expect("a non-empty password must stretch");
+        let keys = expand_master_key(&master_key).expect("expansion must succeed");
+
+        let ciphertext = compress_and_encrypt(
+            &b"a payload long enough to fill a whole keystream block and then some".repeat(4),
+            keys.enc_key(),
+            keys.nonce(),
+            &XChaCha20Poly1305Cipher::new(),
+        )
+        .expect("encryption must succeed");
+
+        ciphertext.iter().copied().take(64).collect()
+    }
+
+    /// Every layout reduces to the same notion of brightness.
+    #[test]
+    fn luminance_reads_each_layout_on_the_same_scale() {
+        // Grayscale is passed through untouched.
+        assert_eq!(luminance(&[110], ColorSpace::Luma8), 110);
+
+        // BT.601 weights the green channel most and the blue least.
+        assert_eq!(luminance(&[255, 0, 0], ColorSpace::Rgb8), 76);
+        assert_eq!(luminance(&[0, 255, 0], ColorSpace::Rgb8), 149);
+        assert_eq!(luminance(&[0, 0, 255], ColorSpace::Rgb8), 29);
+
+        // The alpha channel is not part of the brightness of a pixel.
+        assert_eq!(
+            luminance(&[255, 0, 0, 17], ColorSpace::Rgba8),
+            luminance(&[255, 0, 0], ColorSpace::Rgb8)
+        );
+
+        // Sixteen-bit samples are read as little-endian pairs and normalised to
+        // the same 0..=255 range, so `DELTA_MIN` means one thing at both depths.
+        assert_eq!(
+            luminance(&[0xFF, 0xFF, 0, 0, 0, 0], ColorSpace::Rgb16),
+            luminance(&[255, 0, 0], ColorSpace::Rgb8)
+        );
+    }
+
+    /// A textured container hashes reproducibly and leaves nothing to guess.
+    #[test]
+    fn a_textured_container_has_a_single_hypothesis() {
+        let image = stable_noise_image(1);
+
+        let hypotheses = match phash_salt_hypotheses(&image) {
+            Ok(hypotheses) => hypotheses,
+            Err(error) => panic!("colour noise must hash stably: {error}"),
+        };
+
+        assert!(
+            hypotheses.alternative.is_none(),
+            "a fully determined hash has nothing to disambiguate"
+        );
+
+        let salt = compute_stable_phash(&image).expect("the same image must hash again");
+        assert_eq!(salt.as_bytes(), hypotheses.primary.as_bytes());
+    }
+
+    /// A container with no structure is refused, and the refusal counts the
+    /// bits it could not pin down.
+    #[test]
+    fn a_flat_container_is_refused_as_unstable() {
+        let error = phash_salt_hypotheses(&flat_image())
+            .map(|_| ())
+            .expect_err("a uniform image cannot hash reproducibly");
+
+        match error {
+            PHashError::InsufficientStability {
+                unstable_bits,
+                threshold,
+            } => {
+                assert!(unstable_bits > MAX_UNSTABLE_BITS);
+                assert_eq!(threshold, DELTA_MIN);
+            }
+            other => panic!("expected an instability verdict, got: {other:?}"),
+        }
+    }
+
+    /// Uncertain bits always come in pairs, so `k` is never exactly one.
+    ///
+    /// A structural property of the filter rather than an accident of the
+    /// images below. The median of an even-sized sample is the midpoint of its
+    /// two central values, so those two are equidistant from it and no other
+    /// coefficient can be closer: whenever the smallest margin falls under
+    /// [`DELTA_MIN`], two bits do at once.
+    ///
+    /// The consequence is worth stating where it can be checked: the branch of
+    /// [`recover_phash_salt`] that resolves a single uncertain bit describes a
+    /// case this filter cannot produce, and every container it accepts has a
+    /// hash that is fully determined.
+    #[test]
+    fn uncertain_bits_never_appear_alone() {
+        for seed in 0..64u64 {
+            let unstable = compute_hash_bits(&noise_image(seed)).unstable_indices().len();
+
+            assert_ne!(unstable, 1, "seed {seed} produced a lone uncertain bit");
+        }
+
+        assert_ne!(
+            compute_hash_bits(&flat_image()).unstable_indices().len(),
+            1
+        );
+    }
+
+    /// The hash is a function of the image and of nothing else.
+    #[test]
+    fn the_salt_is_deterministic_and_image_dependent() {
+        let image = stable_noise_image(100);
+        let other_image = stable_noise_image(200);
+
+        let first = compute_stable_phash(&image).expect("noise must hash");
+        let again = compute_stable_phash(&image).expect("noise must hash");
+        let other = compute_stable_phash(&other_image).expect("noise must hash");
+
+        assert_eq!(first.as_bytes(), again.as_bytes());
+        assert_ne!(first.as_bytes(), other.as_bytes());
+    }
+
+    /// Flipping one hash bit changes the whole salt.
+    ///
+    /// The bits are packed and then hashed, so the salt is not a rearrangement
+    /// of them and a neighbouring hypothesis shares nothing with its partner.
+    #[test]
+    fn one_flipped_bit_changes_the_whole_salt() {
+        let mut bits = [false; N_HASH_BITS];
+        let base = salt_from_bits(&bits);
+
+        bits[17] = true;
+        let flipped = salt_from_bits(&bits);
+
+        assert_ne!(base.as_bytes(), flipped.as_bytes());
+    }
+
+    /// The median of an even sample is the midpoint of its two central values.
+    #[test]
+    fn the_median_is_the_midpoint_of_the_two_central_coefficients() {
+        let mut coefficients = [0.0f32; N_HASH_BITS];
+        for (index, value) in coefficients.iter_mut().enumerate() {
+            *value = index as f32;
+        }
+
+        assert_eq!(median(&coefficients), 31.5);
+    }
+
+    /// A correct key uncovers a Zstandard frame; a wrong one uncovers noise.
+    #[test]
+    fn the_zstd_magic_number_tells_the_keys_apart() {
+        let bits = [true; N_HASH_BITS];
+        let prefix = ciphertext_prefix_for(&bits);
+
+        let salt = salt_from_bits(&bits);
+        let master_key = Argon2Kdf::low_cost_for_tests()
+            .derive(PASSWORD, &salt)
+            .expect("a non-empty password must stretch");
+        let keys = expand_master_key(&master_key).expect("expansion must succeed");
+
+        assert!(prefix_matches_key(&keys, &prefix));
+
+        // Any other key decrypts the same prefix to bytes that are not a frame
+        // header, which is the whole discriminator.
+        let other = expand_master_key(&MasterKey::new([0x5Au8; 32])).expect("expansion");
+        assert!(!prefix_matches_key(&other, &prefix));
+
+        // A prefix too short to hold the magic number decides nothing.
+        assert!(!prefix_matches_key(&keys, &prefix[..3]));
+    }
+
+    /// One hypothesis is confirmed by the payload, the other is not.
+    #[test]
+    fn a_hypothesis_is_judged_by_the_payload_it_explains() {
+        let kdf = Argon2Kdf::low_cost_for_tests();
+        let bits = [true; N_HASH_BITS];
+        let prefix = ciphertext_prefix_for(&bits);
+
+        // `PHashSalt` implements neither `Debug` nor `PartialEq` — it is derived
+        // from the container and must not reach a log — so every arm below is
+        // spelled out rather than compared with `assert!(matches!(..))`.
+        match try_hypothesis(&bits, PASSWORD, &kdf, &prefix) {
+            Ok(Some(salt)) => assert_eq!(salt.as_bytes(), salt_from_bits(&bits).as_bytes()),
+            Ok(None) => panic!("the hypothesis the payload was made under must match"),
+            Err(error) => panic!("derivation must succeed: {error}"),
+        }
+
+        let mut wrong = bits;
+        wrong[0] = false;
+        match try_hypothesis(&wrong, PASSWORD, &kdf, &prefix) {
+            Ok(None) => {}
+            Ok(Some(_)) => panic!("a hypothesis that explains nothing must be rejected"),
+            Err(error) => panic!("derivation must succeed: {error}"),
+        }
+
+        // A derivation that fails is not a rejection: it says nothing about
+        // which hypothesis was right and must not be reported as one.
+        match try_hypothesis(&bits, &[], &kdf, &prefix) {
+            Err(PHashError::KdfError(_)) => {}
+            Err(error) => panic!("expected a derivation failure, got: {error}"),
+            Ok(_) => panic!("an empty password must fail derivation"),
+        }
+    }
+
+    /// A hash with no uncertain bit needs no search.
+    #[test]
+    fn recovery_short_circuits_on_a_certain_hash() {
+        let image = stable_noise_image(4);
+        let expected = compute_stable_phash(&image).expect("noise must hash");
+
+        let recovered = recover_phash_salt(&image, PASSWORD, &Argon2Kdf::low_cost_for_tests(), &[])
+            .expect("a fully determined hash needs no payload to be recovered");
+
+        assert_eq!(recovered.as_bytes(), expected.as_bytes());
+    }
+
+    /// An image whose hash is not reproducible is refused by the recovery path
+    /// on the same terms as by the sender's path.
+    #[test]
+    fn recovery_refuses_an_unstable_image() {
+        let error = recover_phash_salt(
+            &flat_image(),
+            PASSWORD,
+            &Argon2Kdf::low_cost_for_tests(),
+            &[],
+        )
+        .map(|_| ())
+        .expect_err("a uniform image has no hash to recover");
+
+        assert!(
+            matches!(error, PHashError::InsufficientStability { .. }),
+            "got: {error:?}"
+        );
+    }
+
+    /// Every failure of this layer explains itself.
+    #[test]
+    fn every_failure_explains_itself() {
+        let unstable = PHashError::InsufficientStability {
+            unstable_bits: 7,
+            threshold: DELTA_MIN,
+        }
+        .to_string();
+        assert!(unstable.contains('7') && unstable.contains("texture"));
+
+        assert!(!PHashError::RecoveryFailed.to_string().is_empty());
+        assert!(PHashError::KdfError("empty password".to_owned())
+            .to_string()
+            .contains("empty password"));
+    }
+}

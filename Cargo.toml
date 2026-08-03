@@ -17,6 +17,15 @@ homepage = "https://github.com/stenoxide/stenoxide"
 # toolkit that is not part of the crate.
 exclude = ["tests/*", "scripts/*"]
 
+# Coverage runs the test profile with instrumentation, and instrumentation is
+# per-codegen-unit: with the default parallel split a line can be attributed to
+# whichever unit inlined it, which shows up as a coverage figure that moves
+# between machines. One unit is slower to build and reports the same numbers
+# everywhere, which is what a merge gate needs.
+[profile.coverage]
+inherits = "test"
+codegen-units = 1
+
 [workspace.dependencies]
 image = "0.25"
 zstd = "0.13"
@@ -39,3 +48,4 @@ cc = "1.4"
 clap = { version = "4.6", features = ["derive"] }
 rpassword = "7.5"
 tempfile = "3.27"
+static_assertions = "1.1"

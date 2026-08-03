@@ -1049,6 +1049,71 @@ mod tests {
         assert!(up > 0 && down > 0, "{up} increments against {down} decrements");
     }
 
+    /// TEST 3c — samples sitting at the ends of the range move inwards.
+    ///
+    /// The one place the `±1` operator has no choice: a sample at `0` can only
+    /// go up and one at `255` can only go down, whatever the keystream says.
+    /// Getting it wrong would wrap the sample to the other end of the range — a
+    /// change of 255 levels in a scheme whose whole premise is changes of one —
+    /// so the cover here is built entirely out of those two values.
+    #[test]
+    fn samples_at_the_ends_of_the_range_move_inwards() {
+        let original: Vec<u8> = (0..20_000)
+            .map(|index| if index % 2 == 0 { 0 } else { u8::MAX })
+            .collect();
+        let mut pixels = original.clone();
+        let costs = vec![1.0f32; pixels.len()];
+        let payload: Vec<u8> = (0..40u8).map(|value| value.wrapping_mul(53)).collect();
+        let config = StcConfig::new(SEED);
+
+        if let Err(error) = stc_encode_safe(&mut pixels, &costs, &payload, &config) {
+            panic!("a cover at the ends of the range must still embed: {error}");
+        }
+
+        let mut raised = 0usize;
+        let mut lowered = 0usize;
+
+        for (before, after) in original.iter().zip(pixels.iter()) {
+            match (*before, *after) {
+                (0, 0) | (u8::MAX, u8::MAX) => {}
+                (0, 1) => raised += 1,
+                (u8::MAX, 254) => lowered += 1,
+                (before, after) => {
+                    panic!("a sample moved from {before} to {after}, which is not an inward ±1")
+                }
+            }
+        }
+
+        assert!(
+            raised > 0 && lowered > 0,
+            "{raised} raised from zero against {lowered} lowered from the maximum"
+        );
+
+        match stc_decode_safe(&pixels, payload.len() * 8, &config) {
+            Ok(recovered) => assert_eq!(recovered, payload),
+            Err(error) => panic!("the payload must still come back out: {error}"),
+        }
+    }
+
+    /// The configuration exposes its parameters and hides its key material.
+    #[test]
+    fn the_configuration_reads_but_never_prints_its_seed() {
+        let config = StcConfig::new(SEED);
+
+        assert_eq!(config.stc_seed(), &SEED);
+        assert_eq!(config.trellis_height(), DEFAULT_TRELLIS_HEIGHT);
+        assert_eq!(config.max_bpp(), MAX_BPP);
+
+        // Truncating towards zero: a capacity rounded up would be a payload the
+        // ceiling does not actually allow.
+        assert_eq!(config.capacity_bits(1_000), 20);
+        assert_eq!(config.capacity_bits(49), 0);
+
+        let rendered = format!("{config:?}");
+        assert!(rendered.contains("redacted"), "got: {rendered}");
+        assert!(!rendered.contains("90"), "the seed must not appear: {rendered}");
+    }
+
     /// TEST 4a — a cover and a cost map of different lengths are refused.
     #[test]
     fn mismatched_lengths_are_refused() {

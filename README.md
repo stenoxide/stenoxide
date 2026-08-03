@@ -110,6 +110,22 @@ an intercepted image is looking for.
 | [stenoxide-core](stenoxide-core/) | Core library: validation, cryptography, cost analysis and embedding |
 | [stenoxide-cli](stenoxide-cli/) | Command-line interface, installed as `stenoxide` |
 
+## Development
+
+```sh
+# Run the test suite
+cargo test --workspace
+
+# Run tests with coverage
+cargo llvm-cov --workspace --lcov --output-path lcov.info
+cargo llvm-cov report --html
+```
+
+Coverage is a merge requirement: the line coverage of the workspace must stay at
+or above 90%, and CI runs `cargo llvm-cov --workspace --fail-under-lines 90` on
+every pull request. `cargo llvm-cov` is installed with
+`cargo install cargo-llvm-cov --locked`.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

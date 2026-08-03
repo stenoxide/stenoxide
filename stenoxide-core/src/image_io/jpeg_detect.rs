@@ -182,7 +182,15 @@ fn sampling_seed(pixels: &[u8]) -> [u8; 32] {
 /// touches at most [`MAX_SAMPLES`] blocks, this touches every pixel.
 /// [`IndexedParallelIterator::collect`] preserves order, so the resulting plane
 /// is laid out exactly as the sequential version would lay it out.
-fn luminance_plane(pixels: &[u8], pixel_count: usize, color_space: ColorSpace) -> Vec<f32> {
+///
+/// Shared with [`crate::cost::hill`], which runs its convolutions over the same
+/// plane. Like [`luminance`] itself, it exists once so that the analyses of the
+/// image cannot disagree about what the brightness of a pixel is.
+pub(crate) fn luminance_plane(
+    pixels: &[u8],
+    pixel_count: usize,
+    color_space: ColorSpace,
+) -> Vec<f32> {
     let bytes_per_pixel = color_space.bytes_per_pixel();
 
     (0..pixel_count)
@@ -213,13 +221,7 @@ fn luminance_plane(pixels: &[u8], pixel_count: usize, color_space: ColorSpace) -
 /// image that pixel does not exist, and the step is dropped: the counts are
 /// returned alongside the sums precisely so that a truncated block does not
 /// weigh as much as a complete one.
-fn block_energies(
-    luma: &[f32],
-    width: usize,
-    height: usize,
-    x0: usize,
-    y0: usize,
-) -> StepEnergies {
+fn block_energies(luma: &[f32], width: usize, height: usize, x0: usize, y0: usize) -> StepEnergies {
     let at = |x: usize, y: usize| luma.get(y * width + x).copied();
     let mut energies = StepEnergies::default();
 
@@ -335,7 +337,5 @@ pub fn detect_jpeg_artifacts(
         pooled.absorb(&block_energies(&luma, width, height, x0, y0));
     }
 
-    pooled
-        .ratio()
-        .filter(|&ratio| ratio > ARTIFACT_THRESHOLD)
+    pooled.ratio().filter(|&ratio| ratio > ARTIFACT_THRESHOLD)
 }

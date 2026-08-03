@@ -20,7 +20,11 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          # `llvm-tools-preview` carries the profiling runtime and the
+          # `llvm-profdata`/`llvm-cov` binaries the coverage step shells out to.
+          # Without it that step fails on a missing tool rather than on the
+          # figure it is there to check.
+          components: clippy, llvm-tools-preview
 
       - name: Cache dependencies
         uses: actions/cache@v4

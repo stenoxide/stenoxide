@@ -1,0 +1,25 @@
+[package]
+name = "stenoxide-cli"
+description = "Command line interface for the stenoxide steganography system"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "stenoxide"
+path = "src/main.rs"
+
+[dependencies]
+stenoxide-core = { path = "../stenoxide-core" }
+clap.workspace = true
+rpassword.workspace = true
+zeroize.workspace = true
+
+[features]
+default = []
+# Forwards the post-quantum feature to the core crate.
+pqc = ["stenoxide-core/pqc"]
+# Forwards the STC FFI build to the core crate. Enabled from PROMPT 6 on.
+ffi-stc = ["stenoxide-core/ffi-stc"]

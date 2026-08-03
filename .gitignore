@@ -1,0 +1,4 @@
+/target
+prompts/
+*.env
+LIBSDC_PATH

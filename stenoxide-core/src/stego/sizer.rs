@@ -35,7 +35,7 @@
 use std::fmt;
 
 use crate::cost::CostMap;
-use crate::stego::stc::ffi::MAX_BPP;
+use crate::stego::stc::MAX_BPP;
 
 /// Share of the gross capacity that survives Syndrome-Trellis coding.
 ///

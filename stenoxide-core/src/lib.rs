@@ -14,10 +14,10 @@
 //!
 //! ## Linting policy
 //!
-//! Fallible operations must be expressed through `Result`. Panicking helpers
-//! and `unsafe` are denied crate-wide; the single documented exception is the
-//! STC FFI wrapper, which re-enables `unsafe` locally and justifies every block
-//! with a `// SAFETY:` comment.
+//! Fallible operations must be expressed through `Result`. Panicking helpers and
+//! `unsafe` are denied crate-wide, without exception: the Syndrome-Trellis coder
+//! was the one module that used to re-enable `unsafe` locally, and since PROMPT
+//! 6b it is [`stego::stc::native`], which is safe Rust and links nothing.
 
 #![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]

@@ -21,5 +21,6 @@ zeroize.workspace = true
 default = []
 # Forwards the post-quantum feature to the core crate.
 pqc = ["stenoxide-core/pqc"]
-# Forwards the STC FFI build to the core crate. Enabled from PROMPT 6 on.
+# DEPRECATED since PROMPT 6b, along with the core feature it forwards to: the
+# Syndrome-Trellis coder is native Rust and the binary links no C++.
 ffi-stc = ["stenoxide-core/ffi-stc"]

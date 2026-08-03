@@ -4,6 +4,15 @@
 //! compiling and linking the external libsdc++ Syndrome-Trellis Codes library,
 //! and that step is gated behind the `ffi-stc` feature.
 //!
+//! # The feature is deprecated
+//!
+//! Since PROMPT 6b the Syndrome-Trellis coder is `stego::stc::native`, written
+//! in safe Rust, and nothing in the crate calls into libsdc++ any more.
+//! Enabling `ffi-stc` therefore builds a static library the crate does not link
+//! against. The feature and this script are kept so that a future comparison
+//! against the reference implementation does not have to be reconstructed from
+//! scratch; new builds should leave it off, which is the default.
+//!
 //! With the feature disabled the script is a no-op, so a plain
 //! `cargo build`/`cargo check` never depends on `LIBSDC_PATH` and never needs a
 //! C++ toolchain. Enabling the feature makes both mandatory, which is why the

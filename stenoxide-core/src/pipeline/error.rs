@@ -20,7 +20,7 @@ use crate::crypto::kdf::KdfError;
 use crate::image_io::phash::PHashError;
 use crate::image_io::validate::ValidationError;
 use crate::stego::sizer::SizerError;
-use crate::stego::stc::ffi::StcError;
+use crate::stego::stc::StcError;
 
 /// Failure while writing the stego image to disk.
 ///

@@ -29,11 +29,19 @@
 //!
 //! # What a cover symbol is
 //!
-//! The coder works on binary vectors — one symbol per byte, each `0` or `1` —
-//! not on raw samples. This module extracts one symbol per pixel, the least
-//! significant bit of the pixel's first sample byte, and writes the coder's
-//! output back into that same bit while leaving the rest of the sample
-//! untouched.
+//! The carrier *sample* of a pixel — its first byte — not the bit inside it.
+//! This module hands the coder one such byte per position and writes back
+//! whatever the coder made of it; the bit the payload travels in is the least
+//! significant one, and reading it out is [`crate::stego::stc`]'s business.
+//!
+//! The distinction matters, and it is the reason this module passes bytes rather
+//! than the `0`/`1` symbols the former FFI coder wanted. The coder does not
+//! overwrite the carrier bit, it moves the whole sample by one level — `+1` or
+//! `-1`, chosen from the keystream. Overwriting the bit would pair every even
+//! value with the odd one above it and never the reverse, which is precisely the
+//! asymmetry RS Analysis and Sample Pair Analysis measure. Handing over only the
+//! bit would make that impossible to express: the sign of the change is a fact
+//! about the sample, not about the bit.
 //!
 //! One bit per pixel, from the first channel, is the carrier the layers below
 //! were written against: [`crate::cost::CostMap`] holds one cost per pixel
@@ -42,7 +50,10 @@
 //! red plane is where the bit goes. On a [`ColorSpace::Rgb16`] container the
 //! first byte is the low half of the red sample, because validation stores
 //! 16-bit samples as explicit little-endian pairs; the carrier is therefore the
-//! least significant bit of the 16-bit value on every layout.
+//! least significant bit of the 16-bit value on every layout. The `±1` operator
+//! stays inside that byte on all four layouts: it only ever moves a value away
+//! from the end of the range it sits at, so a low half of `0` goes up and one of
+//! `255` goes down, and the 16-bit sample changes by exactly one level too.
 
 use std::path::Path;
 
@@ -122,14 +133,14 @@ fn carrier_offset(index: usize, color_space: ColorSpace) -> usize {
     index * color_space.bytes_per_pixel()
 }
 
-/// Reads one cover symbol per position, in embedding order.
+/// Reads one carrier sample per position, in embedding order.
 ///
 /// `permutation` is the secret visiting order produced by
 /// [`crate::stego::permute::generate_pixel_permutation`]; the returned vector
-/// holds the carrier bit of `permutation[i]` at index `i`, which is the order
+/// holds the carrier byte of `permutation[i]` at index `i`, which is the order
 /// both the cost vector and the coder work in.
 ///
-/// Positions outside the buffer contribute a zero symbol. That cannot happen
+/// Positions outside the buffer contribute a zero sample. That cannot happen
 /// for a permutation of the image's own pixel count, which is the only kind this
 /// crate builds; the fallback exists so the function is total without indexing.
 pub(crate) fn gather_cover_symbols(image: &ImageBuffer, permutation: &[usize]) -> Vec<u8> {
@@ -141,24 +152,26 @@ pub(crate) fn gather_cover_symbols(image: &ImageBuffer, permutation: &[usize]) -
         .map(|&index| {
             pixels
                 .get(carrier_offset(index, color_space))
-                .map_or(0, |sample| sample & 1)
+                .copied()
+                .unwrap_or(0)
         })
         .collect()
 }
 
-/// Writes stego symbols back into the carrier bit of each pixel.
+/// Writes the stego samples back into the carrier byte of each pixel.
 ///
 /// The inverse of [`gather_cover_symbols`], and the only place in the crate
-/// where container samples are modified. Every other bit of every sample is left
-/// exactly as the decoder produced it: the difference between cover and stego is
-/// confined to the least significant bit of the positions the trellis chose.
+/// where container samples are modified. Every byte of every pixel other than
+/// the carrier is left exactly as the decoder produced it, and the carrier
+/// itself differs from the cover by at most one level: the coder returns the
+/// samples it was given, with the ones the trellis chose moved by `±1`.
 pub(crate) fn apply_cover_symbols(image: &mut ImageBuffer, permutation: &[usize], symbols: &[u8]) {
     let color_space = image.color_space();
     let pixels = image.pixels_mut();
 
     for (&index, &symbol) in permutation.iter().zip(symbols.iter()) {
         if let Some(sample) = pixels.get_mut(carrier_offset(index, color_space)) {
-            *sample = (*sample & !1) | (symbol & 1);
+            *sample = symbol;
         }
     }
 }

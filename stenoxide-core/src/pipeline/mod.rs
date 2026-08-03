@@ -52,7 +52,7 @@ use crate::image_io::phash::{
 use crate::image_io::validate::load_and_validate;
 use crate::stego::permute::generate_pixel_permutation;
 use crate::stego::sizer::{compute_capacity, validate_payload_fits, EmbeddingMode, SizerError};
-use crate::stego::stc::ffi::{stc_decode_safe, stc_encode_safe, StcConfig};
+use crate::stego::stc::{stc_decode_safe, stc_encode_safe, StcConfig};
 
 pub use crate::pipeline::error::{OutputError, PipelineError};
 
@@ -84,7 +84,7 @@ pub struct EmbedReport {
     /// Bits embedded per pixel of the container, frame header included.
     ///
     /// The figure the security of the scheme rests on. It is bounded by
-    /// [`crate::stego::stc::ffi::MAX_BPP`] on each region of the frame, so it can
+    /// [`crate::stego::stc::MAX_BPP`] on each region of the frame, so it can
     /// never reach that ceiling over the image as a whole.
     pub effective_bpp: f32,
     /// Dimensions of the container as `(width, height)`, in pixels.

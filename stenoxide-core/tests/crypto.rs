@@ -1,16 +1,15 @@
 //! Tests of the cryptographic chain on its own, without the coder.
 //!
 //! Everything from the container's perceptual hash down to the authenticated
-//! ciphertext runs without Syndrome-Trellis coding, so this half of the pipeline
-//! can be exercised in a build that has no `ffi-stc`. That is the whole reason
-//! the file exists: the round trip in `integration.rs` is the natural home for
-//! these assertions, and it is precisely the test that cannot run here.
+//! ciphertext runs without Syndrome-Trellis coding, and this file pins that half
+//! on its own. The round trip in `integration.rs` covers the same ground on its
+//! way past, but only as a whole: when it breaks it says the message did not
+//! come back, not which of the four derivations moved.
 //!
-//! It also covers the dependency surface. Argon2id, HKDF-SHA3-512 and
-//! XChaCha20-Poly1305 come from four separate crates that move independently,
-//! and a version bump that quietly changed a derivation would otherwise show up
-//! as an unrelated failure much later — or, with no round trip to run, not at
-//! all.
+//! That is the dependency surface these tests exist for. Argon2id, HKDF-SHA3-512
+//! and XChaCha20-Poly1305 come from separate crates that move independently, and
+//! a version bump quietly changing a derivation would otherwise surface as an
+//! unrelated failure much later.
 
 mod support;
 

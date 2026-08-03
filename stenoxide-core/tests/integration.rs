@@ -13,19 +13,19 @@
 //! both are load-bearing: a stub cost model would make the round trip prove
 //! nothing about whether HILL accepts the container.
 //!
-//! # What the `ffi-stc` feature changes
+//! # Everything here runs on a default build
 //!
-//! Syndrome-Trellis coding lives in an external C++ library that the build
-//! links only under the `ffi-stc` feature; without it `stc_encode_safe` and
-//! `stc_decode_safe` return `StcError::FeatureNotEnabled` and no payload can
-//! travel. The tests that need a real coder are therefore compiled only when
-//! the feature is on, and the default build asserts instead that the pipeline
-//! reaches the coder with everything else already satisfied — see
-//! `embedding_stops_at_the_missing_coder`. Running the round trips needs:
+//! Until PROMPT 6b the Syndrome-Trellis coder was an external C++ library the
+//! build linked only under the `ffi-stc` feature, so every round trip below was
+//! compiled out of a default `cargo test` and the suite could only assert that
+//! the pipeline *reached* the coder. The coder is now native Rust and always
+//! present, which is why the gates are gone: a plain
 //!
 //! ```text
-//! LIBSDC_PATH=/path/to/libsdc cargo test --workspace --features ffi-stc
+//! cargo test --workspace
 //! ```
+//!
+//! exercises the whole chain, embedding included.
 
 mod support;
 
@@ -52,7 +52,6 @@ const MESSAGE: &[u8] = "Top secret test message".as_bytes();
 const PASSWORD: &[u8] = "naïve-container-passphrase".as_bytes();
 
 /// A password that is not [`PASSWORD`].
-#[cfg(feature = "ffi-stc")]
 const WRONG_PASSWORD: &[u8] = "NOT-THE-CORRECT-PASSPHRASE".as_bytes();
 
 /// A pipeline that is production-grade in everything except its key deriver.
@@ -99,7 +98,6 @@ fn fixtures_have_the_properties_the_tests_rely_on() {
 }
 
 /// TEST 1 — a message survives a full embed and extract cycle.
-#[cfg(feature = "ffi-stc")]
 #[test]
 fn round_trip_recovers_the_message() {
     let stego = NamedTempFile::new().expect("temporary stego file");
@@ -121,7 +119,6 @@ fn round_trip_recovers_the_message() {
 }
 
 /// TEST 2 — the wrong password is an authentication failure and nothing more.
-#[cfg(feature = "ffi-stc")]
 #[test]
 fn wrong_password_fails_authentication_without_saying_so() {
     use stenoxide_core::crypto::aead::{AEADError, CryptoError};
@@ -254,7 +251,6 @@ fn oversized_payload_is_refused_without_leaking_parameters() {
 /// which only works if embedding at `0.02` bits per pixel leaves every DCT
 /// coefficient of the 32x32 thumbnail on the same side of the median it started
 /// on. This test is what says that in practice rather than in the abstract.
-#[cfg(feature = "ffi-stc")]
 #[test]
 fn embedding_leaves_the_perceptual_hash_reproducible() {
     let stego_file = NamedTempFile::new().expect("temporary stego file");
@@ -297,40 +293,5 @@ fn undersized_image_is_rejected() {
             }
         ),
         "expected the size gate to name the offending dimensions, got: {error:?}"
-    );
-}
-
-/// What the round trips would test, in a build that cannot run them.
-///
-/// Compiled only without `ffi-stc`. It drives the same fixture through the same
-/// pipeline and asserts that the *only* thing standing between it and an
-/// embedded payload is the missing coder: reaching
-/// `StcError::FeatureNotEnabled` means the container was loaded, hashed,
-/// stretched into a key, encrypted, cost-mapped and found to have room, since
-/// every one of those steps precedes the first trellis pass and any of them
-/// could have failed first.
-///
-/// It is not a substitute for the round trip. It is the assurance that when the
-/// library is linked in, the round trip is the only thing left to check.
-#[cfg(not(feature = "ffi-stc"))]
-#[test]
-fn embedding_stops_at_the_missing_coder() {
-    use stenoxide_core::stego::stc::ffi::StcError;
-
-    let stego = NamedTempFile::new().expect("temporary stego file");
-
-    let error = test_pipeline()
-        .embed(
-            &support::textured_cover(),
-            secret(MESSAGE),
-            secret(PASSWORD),
-            stego.path(),
-        )
-        .map(|_| ())
-        .expect_err("a build without the coder cannot embed anything");
-
-    assert!(
-        matches!(error, PipelineError::Stc(StcError::FeatureNotEnabled)),
-        "every layer before the coder must have accepted the fixture, got: {error:?}"
     );
 }

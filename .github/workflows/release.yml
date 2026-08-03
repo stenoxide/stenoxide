@@ -1,0 +1,289 @@
+name: Release
+
+on:
+  pull_request:
+    branches: [stable]
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Version, build and publish
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    outputs:
+      next_version: ${{ steps.version.outputs.next }}
+
+    steps:
+      # `ref: stable` rather than the default: on a closed pull_request the
+      # default checkout is the detached merge ref, which cannot be pushed back
+      # to the branch. `fetch-depth: 0` brings the tags the version calculation
+      # reads.
+      - uses: actions/checkout@v4
+        with:
+          ref: stable
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # Derive the next version from the commit subjects since the last tag:
+      #   BREAKING CHANGE, feat! or fix!  -> major
+      #   feat                            -> minor
+      #   anything else                   -> patch
+      # With no previous tag the version already in Cargo.toml is taken as is.
+      # A hand-written version greater than the calculated one always wins, so
+      # a deliberate bump in Cargo.toml is never overwritten.
+      - name: Calculate next version
+        id: version
+        run: |
+          CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "//;s/"//')
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
+          echo "last_tag=$LAST_TAG" >> $GITHUB_OUTPUT
+
+          if [ "$LAST_TAG" = "none" ]; then
+            echo "next=$CURRENT" >> $GITHUB_OUTPUT
+            echo "is_first=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "is_first=false" >> $GITHUB_OUTPUT
+
+          COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=format:"%s")
+
+          MAJOR=0
+          MINOR=0
+          PATCH=0
+
+          while IFS= read -r commit; do
+            if echo "$commit" | grep -qE "BREAKING CHANGE|^feat!|^fix!"; then
+              MAJOR=1
+            elif echo "$commit" | grep -qE "^feat"; then
+              MINOR=1
+            elif echo "$commit" | grep -qE "^fix|^chore|^docs|^refactor|^perf"; then
+              PATCH=1
+            fi
+          done <<< "$COMMITS"
+
+          MAJOR_V=$(echo $CURRENT | cut -d. -f1)
+          MINOR_V=$(echo $CURRENT | cut -d. -f2)
+          PATCH_V=$(echo $CURRENT | cut -d. -f3)
+
+          if [ $MAJOR -eq 1 ]; then
+            CALCULATED="$((MAJOR_V + 1)).0.0"
+          elif [ $MINOR -eq 1 ]; then
+            CALCULATED="${MAJOR_V}.$((MINOR_V + 1)).0"
+          else
+            CALCULATED="${MAJOR_V}.${MINOR_V}.$((PATCH_V + 1))"
+          fi
+
+          if [ "$(printf '%s\n' "$CALCULATED" "$CURRENT" | sort -V | tail -1)" = "$CURRENT" ] && [ "$CURRENT" != "$CALCULATED" ]; then
+            echo "next=$CURRENT" >> $GITHUB_OUTPUT
+          else
+            echo "next=$CALCULATED" >> $GITHUB_OUTPUT
+          fi
+
+      # Both member crates inherit `version.workspace = true`, so the root
+      # manifest is the only place the number lives. The one exception is the
+      # registry requirement stenoxide-cli states on stenoxide-core, which has
+      # to move with it or a major bump would leave the CLI asking for a
+      # version range the newly published core no longer satisfies.
+      - name: Bump version in Cargo.toml
+        if: steps.version.outputs.current != steps.version.outputs.next
+        run: |
+          NEXT=${{ steps.version.outputs.next }}
+          sed -i "s/^version = \"${{ steps.version.outputs.current }}\"/version = \"$NEXT\"/" Cargo.toml
+          sed -i "/^stenoxide-core = /s/version = \"[^\"]*\"/version = \"$NEXT\"/" stenoxide-cli/Cargo.toml
+          cargo update --workspace
+
+      - name: Generate changelog
+        run: |
+          VERSION=${{ steps.version.outputs.next }}
+          DATE=$(date +%Y-%m-%d)
+          LAST_TAG=${{ steps.version.outputs.last_tag }}
+
+          if [ "$LAST_TAG" = "none" ]; then
+            COMMITS=$(git log --pretty=format:"- %s" | head -50)
+          else
+            COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=format:"- %s")
+          fi
+
+          BREAKING=$(echo "$COMMITS" | grep -E "BREAKING CHANGE|^- feat!|^- fix!" || true)
+          FEATURES=$(echo "$COMMITS" | grep -E "^- feat" | grep -v "!" || true)
+          FIXES=$(echo "$COMMITS" | grep -E "^- fix" | grep -v "!" || true)
+          OTHER=$(echo "$COMMITS" | grep -vE "^- feat|^- fix|BREAKING" || true)
+
+          ENTRY="## [$VERSION] - $DATE\n"
+
+          if [ -n "$BREAKING" ]; then
+            ENTRY="${ENTRY}\n### Breaking Changes\n${BREAKING}\n"
+          fi
+          if [ -n "$FEATURES" ]; then
+            ENTRY="${ENTRY}\n### Features\n${FEATURES}\n"
+          fi
+          if [ -n "$FIXES" ]; then
+            ENTRY="${ENTRY}\n### Bug Fixes\n${FIXES}\n"
+          fi
+          if [ -n "$OTHER" ]; then
+            ENTRY="${ENTRY}\n### Other Changes\n${OTHER}\n"
+          fi
+
+          if [ -f CHANGELOG.md ]; then
+            echo -e "${ENTRY}\n$(cat CHANGELOG.md)" > CHANGELOG.md
+          else
+            echo -e "# Changelog\n\n${ENTRY}" > CHANGELOG.md
+          fi
+
+      - name: Commit version bump and changelog
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock stenoxide-cli/Cargo.toml CHANGELOG.md
+          git diff --staged --quiet || git commit -m "chore: release v${{ steps.version.outputs.next }} [skip ci]"
+          git push origin HEAD:stable
+
+      - name: Create tag
+        run: |
+          git tag v${{ steps.version.outputs.next }}
+          git push origin v${{ steps.version.outputs.next }}
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: stenoxide
+            asset: stenoxide-linux-x86_64
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: stenoxide.exe
+            asset: stenoxide-windows-x86_64.exe
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: stenoxide
+            asset: stenoxide-macos-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.next_version }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} \
+             ${{ matrix.asset }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  github-release:
+    name: Create GitHub Release
+    needs: [release, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # The tag, not the merge ref: the changelog this job quotes was written
+      # by the release job and only exists from that commit onwards.
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.next_version }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      # Written to a file rather than a step output: release notes are
+      # multi-line and would not survive interpolation into a YAML scalar.
+      - name: Extract changelog for this version
+        run: |
+          awk -v hdr="## [${{ needs.release.outputs.next_version }}]" '
+            index($0, hdr) == 1             { found = 1; next }
+            found && index($0, "## [") == 1 { exit }
+            found                           { print }
+          ' CHANGELOG.md > release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.release.outputs.next_version }}
+          name: stenoxide v${{ needs.release.outputs.next_version }}
+          body_path: release-notes.md
+          files: artifacts/**/*
+          draft: false
+          prerelease: false
+
+  publish:
+    name: Publish to crates.io
+    needs: [release, github-release]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.next_version }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # One workspace publication rather than two crate publications with a
+      # sleep between them: cargo orders the members by their dependency graph
+      # and waits for the registry to index each one before continuing, which
+      # is the same thing a fixed sleep tries to approximate and does not.
+      - name: Publish to crates.io
+        run: cargo publish --workspace
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

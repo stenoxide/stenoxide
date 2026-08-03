@@ -63,6 +63,11 @@ original cover, and without the password.
 cargo install stenoxide-cli
 ```
 
+Prebuilt binaries for Linux (`x86_64`), Windows (`x86_64`) and macOS (Apple
+silicon) are attached to every [GitHub
+release](https://github.com/stenoxide/stenoxide/releases) if you would rather
+not compile.
+
 ### Library
 
 ```sh

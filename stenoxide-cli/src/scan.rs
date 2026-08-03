@@ -25,8 +25,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use stenoxide_core::image_io::buffer::CoverSource;
-use stenoxide_core::image_io::validate::load_and_validate;
+use stenoxide_core::image_io::validate::{load_and_validate, probe_geometry};
 
+use crate::progress::Progress;
 use crate::{container_capacity, terminal_renders_unicode, ScanArgs};
 
 /// The extension a container must have, in lower case.
@@ -84,7 +85,55 @@ struct Entry {
 pub fn run(args: &ScanArgs) -> Result<(), String> {
     let files = collect_files(&args.path, args.recursive)?;
 
-    let entries: Vec<Entry> = files.into_iter().map(examine).collect();
+    // Two passes, because the two costs are four orders of magnitude apart.
+    //
+    // The first reads twenty-four bytes of each file and settles every question
+    // that geometry alone can answer: the format, and whether the image is
+    // within the size range at all. On a real folder of pictures that disposes
+    // of most of the files — snapshots, icons, screenshots, anything below
+    // 2000x2000 — for the price of opening them.
+    //
+    // The second decodes what is left and runs the analysis. It is the pass
+    // worth measuring, and by the time it starts the total amount of work is
+    // known exactly: the survivors' pixel counts were read in the first pass.
+    let probed: Vec<(PathBuf, Option<u64>)> = files
+        .into_iter()
+        .map(|path| {
+            let pixels = candidate_pixels(&path);
+            (path, pixels)
+        })
+        .collect();
+
+    let total_megapixels: u64 = probed
+        .iter()
+        .filter_map(|(_, pixels)| *pixels)
+        .map(megapixels)
+        .sum();
+
+    let progress = Progress::new(
+        &format!(
+            "Analysing {} of {} files",
+            probed.iter().filter(|(_, pixels)| pixels.is_some()).count(),
+            probed.len()
+        ),
+        total_megapixels,
+    );
+
+    let entries: Vec<Entry> = probed
+        .into_iter()
+        .map(|(path, pixels)| {
+            if let Some(pixels) = pixels {
+                progress.set_detail(&file_name(&path));
+                let entry = examine(path);
+                progress.advance(megapixels(pixels));
+                entry
+            } else {
+                examine(path)
+            }
+        })
+        .collect();
+
+    progress.finish();
 
     let report = if args.json {
         // Always complete, whatever `--all` says. That flag exists to keep a
@@ -97,6 +146,39 @@ pub fn run(args: &ScanArgs) -> Result<(), String> {
 
     print!("{report}");
     Ok(())
+}
+
+/// Pixels a file will cost to analyse, or `None` if it will not be analysed.
+///
+/// The header probe answers this without decoding anything, so it is what makes
+/// an honest estimate possible: the work of the expensive pass is known before
+/// that pass begins. A file the probe already rejects costs nothing more, and
+/// [`examine`] will reach the same verdict again from the same bytes.
+fn candidate_pixels(path: &Path) -> Option<u64> {
+    let is_png = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_lowercase() == PNG_EXTENSION)
+        .unwrap_or(false);
+
+    if !is_png {
+        return None;
+    }
+
+    probe_geometry(path)
+        .ok()
+        .map(|geometry| geometry.pixel_count())
+}
+
+/// A pixel count in megapixels, rounded up so that no file counts as zero work.
+fn megapixels(pixels: u64) -> u64 {
+    pixels.div_ceil(1024 * 1024)
+}
+
+/// The last component of a path, for a one-line label.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// Every file the path argument names, in a stable order.
@@ -392,6 +474,7 @@ fn describe(error: &stenoxide_core::image_io::validate::ValidationError) -> (&'s
         Error::NotPng => ("NotPng", None),
         Error::UnsupportedColorSpace { .. } => ("UnsupportedColorSpace", None),
         Error::ImageTooSmall { width, height, .. } => ("ImageTooSmall", Some((*width, *height))),
+        Error::ImageTooLarge { width, height, .. } => ("ImageTooLarge", Some((*width, *height))),
         Error::DecodingError(_) => ("DecodingError", None),
         Error::JpegArtifactsDetected { .. } => ("JpegArtifactsDetected", None),
     }

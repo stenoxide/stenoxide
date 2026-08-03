@@ -171,8 +171,21 @@ Syndrome-Trellis coder spends on the code itself and the authentication tag, a
 2000x2000 container carries roughly 8 KB of encrypted payload. Halve the sides
 and you have a quarter of that. Below the minimum there is no useful message
 left to send, and the only way to send one anyway would be to raise the rate —
-which is exactly the trade the cap exists to refuse. A larger image is strictly
-better: more capacity, and the same message spread thinner.
+which is exactly the trade the cap exists to refuse.
+
+**And why there is an upper bound of 128 megapixels.** This one is not about
+security at all, it is about not wedging your machine. Analysing a container
+costs roughly sixteen bytes per pixel at its peak — the decoded samples, three
+floating-point planes of the cost model live at once, and the flood fill's visit
+map — so the working set is a straight multiple of the pixel count. A
+32767x32767 PNG is a perfectly legal file and asks for some sixteen gibibytes to
+analyse, which on an ordinary machine means paging to disk for as long as you
+are willing to wait. Such an image is now refused from its header, in
+milliseconds, rather than attempted. The limit is far above any camera: a
+100-megapixel medium-format back produces a quarter of it.
+
+Between those two bounds, larger is strictly better: more capacity, and the same
+message spread thinner.
 
 **Why texture, and why smooth images are rejected.** Two independent parts of
 the system want the same thing, for different reasons.

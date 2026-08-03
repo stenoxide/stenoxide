@@ -118,6 +118,13 @@ The capacity shown is what the container admits after encryption. The message is
 compressed first, so ordinary text usually fits at two or three times that
 figure.
 
+A recursive scan of a large folder shows a progress bar with a time estimate
+while it works. The estimate is measured in megapixels rather than in files,
+because that is what the analysis costs: a folder mixing snapshots with
+hundred-megapixel exports would otherwise sit at 90% and then take longer than
+the first 90% did. Progress is written to standard error and only when that is a
+terminal, so `--json` and redirected output are never touched by it.
+
 ### Embed
 
 ```sh
@@ -145,7 +152,7 @@ preference:
 |-------------|-----|
 | **PNG**, or any lossless format | The payload lives in the least significant bits of the samples. A lossy codec rewrites exactly those, so a container saved as JPEG or WebP is a destroyed payload rather than a weakened one. |
 | **Never JPEG-compressed**, even if it is a PNG now | Decoding a JPEG and re-saving it as PNG keeps the pixels the codec produced, 8x8 block grid included. A steganalyst already knows the statistics of that grid, so anything added on top of it stands out against a signal they can model. |
-| **At least 2000x2000 pixels** | The embedding rate is capped at 0.02 bits per pixel, and that cap is what keeps the changes invisible. Capacity is therefore a direct function of pixel count: four megapixels buy about 8 KB. Below this size there is no useful payload left to carry without raising the rate, and the rate is not negotiable. |
+| **Between 2000x2000 and 128 megapixels** | The embedding rate is capped at 0.02 bits per pixel, and that cap is what keeps the changes invisible. Capacity is therefore a direct function of pixel count: four megapixels buy about 8 KB. Below the minimum there is no useful payload left to carry without raising the rate, and the rate is not negotiable. The upper bound is memory: the analysis costs about sixteen bytes per pixel at its peak, so a larger image is refused rather than left to exhaust the machine. |
 | **Natural texture**: foliage, fabric, stone, grass | A change can only hide where there is already detail to hide it in. Smooth regions — sky, walls, skin, plain backgrounds — offer nothing to hide behind, and an image that is smooth throughout also fails to hash reproducibly, which the key derivation depends on. |
 
 One more condition the tool cannot check: **the container must not exist

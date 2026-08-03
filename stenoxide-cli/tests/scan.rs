@@ -366,6 +366,63 @@ fn every_rejection_names_itself_in_the_report() {
     );
 }
 
+/// TEST 28 — a container too large to analyse is refused, and refused fast.
+///
+/// The case this limit was written for. A 32767x32767 PNG is a legal file and
+/// compresses to a few hundred kilobytes when it is mostly one colour, so it
+/// costs nothing to produce and nothing to store — and analysing it asks for
+/// some sixteen gibibytes, which on any ordinary machine means paging to disk
+/// for as long as the user is willing to wait.
+///
+/// Both halves are asserted. That the verdict is `ImageTooLarge` says the gate
+/// fired; that the whole scan finishes in seconds says it fired *before*
+/// anything was allocated, which is the only version of this that helps.
+#[test]
+fn a_container_too_large_to_analyse_is_refused_immediately() {
+    let directory = TempDir::new().expect("temporary directory");
+    let path = directory.path().join("enormous.png");
+
+    // A well-formed PNG header declaring that geometry, and nothing behind it.
+    //
+    // Written by hand rather than through the encoder because encoding a real
+    // one means allocating and compressing a gigapixel, which costs a minute
+    // and a gigabyte to produce a file this test never decodes. The header is
+    // genuine down to its checksum — 13-byte `IHDR`, 32767x32767, 8-bit
+    // grayscale — and the image data is deliberately absent.
+    //
+    // The missing body is what makes this a regression test rather than a
+    // tautology. If the size gate were ever moved back behind the decoder, this
+    // file would be reported as a decoding failure instead, and the assertions
+    // below would fail.
+    let mut header = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    header.extend_from_slice(&13u32.to_be_bytes());
+    header.extend_from_slice(b"IHDR");
+    header.extend_from_slice(&32_767u32.to_be_bytes());
+    header.extend_from_slice(&32_767u32.to_be_bytes());
+    header.extend_from_slice(&[8, 0, 0, 0, 0]);
+    header.extend_from_slice(&0x6C99_59E1u32.to_be_bytes());
+
+    std::fs::write(&path, &header).expect("the header should be writable");
+
+    let started = std::time::Instant::now();
+    let report = stdout_of(&stenoxide(&["scan", &path.to_string_lossy(), "--all"]));
+    let elapsed = started.elapsed();
+
+    assert!(report.contains("ImageTooLarge"), "got: {report}");
+    assert!(report.contains("32767x32767"), "got: {report}");
+    assert!(
+        report.contains("Summary: 0 valid, 1 invalid (1 scanned)"),
+        "got: {report}"
+    );
+
+    // Generous by two orders of magnitude against the version that decoded
+    // first, which did not finish at all on a machine with sixteen gibibytes.
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "the refusal took {elapsed:?}, which means it read more than the header"
+    );
+}
+
 /// The set of top-level keys of a JSON object.
 ///
 /// A parser sufficient for the question being asked: the document this crate

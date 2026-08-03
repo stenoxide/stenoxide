@@ -61,6 +61,7 @@ use stenoxide_core::image_io::validate::{load_and_validate, ValidationError};
 use stenoxide_core::pipeline::{EmbedPipeline, EmbedReport};
 use stenoxide_core::stego::sizer::{compute_capacity, EmbeddingMode};
 
+mod progress;
 mod scan;
 
 /// The one thing the user is told when extraction fails, whatever the cause.
@@ -217,6 +218,21 @@ fn describe_rejection(path: &Path, error: &ValidationError) -> String {
             "Error: {file} is {width}x{height}, which is too small.\n       \
              Both sides must be at least {min} pixels."
         ),
+        ValidationError::ImageTooLarge {
+            width,
+            height,
+            pixels,
+            max,
+        } => format!(
+            "Error: {file} is {width}x{height}, which is {} megapixels.\n       \
+             Analysing an image that size needs more memory than this limit \
+             allows,\n       \
+             so it is refused immediately rather than left to exhaust the \
+             machine.\n       \
+             The maximum is {} megapixels; scale it down or use another photo.",
+            pixels / (1024 * 1024),
+            max / (1024 * 1024)
+        ),
         ValidationError::UnsupportedColorSpace { .. } => format!(
             "Error: the pixel layout of {file} is not supported.\n       \
              Use an 8-bit or 16-bit RGB, RGBA or grayscale PNG."
@@ -253,9 +269,20 @@ fn run_embed(input: &Path, output: &Path) -> Result<(), String> {
         return Err("Error: the message is empty; nothing to hide.".to_string());
     }
 
-    let report = EmbedPipeline::default_secure()
+    // Embedding spends most of a minute on a large container — Argon2id at 128
+    // MiB, then a HILL analysis of every pixel — with nothing to show for it
+    // until it finishes. An indicator here reveals nothing: the work is a
+    // function of the container's size and the payload's length, and the report
+    // printed below states both.
+    let activity = progress::Activity::start();
+
+    let outcome = EmbedPipeline::default_secure()
         .embed(input, plaintext, password, output)
-        .map_err(|err| format!("Error: {err}"))?;
+        .map_err(|err| format!("Error: {err}"));
+
+    activity.finish();
+
+    let report = outcome?;
 
     print_report(&report, output);
     Ok(())
@@ -290,9 +317,22 @@ fn run_extract(input: &Path) -> Result<(), String> {
 
     let password = read_password()?;
 
-    let (plaintext, _report) = EmbedPipeline::default_secure()
+    // The indeterminate indicator, and only that one. It names no stage and
+    // reads identically whether the extraction is about to succeed or about to
+    // fail; a staged bar here would announce which of the three failure modes
+    // occurred, which is precisely what this function exists to withhold. See
+    // the `progress` module.
+    let activity = progress::Activity::start();
+
+    let outcome = EmbedPipeline::default_secure()
         .extract(input, password)
-        .map_err(|_| EXTRACTION_FAILED.to_string())?;
+        .map_err(|_| EXTRACTION_FAILED.to_string());
+
+    // Cleared before the result is inspected, so that the last frame drawn is
+    // the same one on both paths.
+    activity.finish();
+
+    let (plaintext, _report) = outcome?;
 
     // Written as raw bytes rather than printed as text: the payload is whatever
     // the sender put in, and forcing it through a string conversion would

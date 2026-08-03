@@ -86,6 +86,7 @@ All development during the initial build phase is driven by numbered prompt file
 2. Warnings are acceptable during intermediate steps. Errors are not.
 3. When a prompt is complete and its verification passes, rename the file: `PROMPTX.md` → `PROMPTX.done.md`. This signals that the step is closed and must not be revisited unless explicitly instructed.
 4. Never modify a `.done.md` file unless the user explicitly asks you to reopen that step.
+5. **The prompts are an internal working device. They must never leak into committed artifacts.** See "No prompt references in code" below.
 
 ---
 
@@ -132,6 +133,20 @@ These rules apply to every file you write or modify:
 **General:**
 - No secrets, credentials, or keys in any committed file.
 - No `TODO` or `FIXME` comments left in committed code without an accompanying explanation of what is blocking the fix.
+
+**No prompt references in code:**
+
+The `prompts/` directory is a private, gitignored scaffolding for the initial build phase. A reader of this repository has never seen it and never will, so a reference to it is noise at best and a dangling pointer at worst.
+
+- **Never mention a prompt in any committed file.** This covers comments, doc comments, `Cargo.toml` comments, build scripts, tests, error messages, README and documentation. Forbidden forms include `PROMPT 6b`, `prompt-5`, "implemented in PROMPT 1", "since PROMPT 6b", "the measurements recorded in the prompt", and every variation of them.
+- **Do not restate the prompt number when describing history.** Describing what the code *is* or *was* is fine and often useful; anchoring it to a prompt is not.
+  - Wrong: `//! Implemented in PROMPT 6, replaced by a native implementation in PROMPT 6b.`
+  - Right: `//! It replaces the FFI wrapper around libsdc++ this module used to carry.`
+  - Wrong: `# DEPRECATED since PROMPT 6b.`
+  - Right: `# DEPRECATED. The Syndrome-Trellis coder is now native Rust.`
+- **"Implemented in PROMPT N" lines add nothing.** Delete them rather than rewriting them: the module doc already says what the module does, and the fact that it exists says it is implemented.
+- **The only exception is commit messages.** `feat(prompt-N): ...` stays, because the prompt-phase history will be squash-merged and those subjects disappear. Nothing else gets the exception.
+- The word "prompt" is perfectly fine when it means an actual prompt in the program's own domain — `PASSWORD_PROMPT`, `rpassword::prompt_password`. The rule is about the `prompts/` workflow, not the word.
 
 ---
 

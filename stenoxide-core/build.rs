@@ -6,8 +6,8 @@
 //!
 //! # The feature is deprecated
 //!
-//! Since PROMPT 6b the Syndrome-Trellis coder is `stego::stc::native`, written
-//! in safe Rust, and nothing in the crate calls into libsdc++ any more.
+//! The Syndrome-Trellis coder is `stego::stc::native`, written in safe Rust,
+//! and nothing in the crate calls into libsdc++ any more.
 //! Enabling `ffi-stc` therefore builds a static library the crate does not link
 //! against. The feature and this script are kept so that a future comparison
 //! against the reference implementation does not have to be reconstructed from

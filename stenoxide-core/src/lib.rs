@@ -16,8 +16,8 @@
 //!
 //! Fallible operations must be expressed through `Result`. Panicking helpers and
 //! `unsafe` are denied crate-wide, without exception: the Syndrome-Trellis coder
-//! was the one module that used to re-enable `unsafe` locally, and since PROMPT
-//! 6b it is [`stego::stc::native`], which is safe Rust and links nothing.
+//! was the one module that used to re-enable `unsafe` locally, and it is now
+//! [`stego::stc::native`], which is safe Rust and links nothing.
 
 #![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]

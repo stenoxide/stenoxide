@@ -100,8 +100,8 @@ const PAYLOAD_SEED: u64 = 0x5041_594C_4F41_4421;
 
 /// JPEG quality the disguised fixture is compressed at.
 ///
-/// The measurements recorded in the prompt for this kind of content put quality
-/// 75 at a blocking ratio of about `3.3`, comfortably above the `1.3` rejection
+/// The reference measurements for this kind of content put quality 75 at a
+/// blocking ratio of about `3.3`, comfortably above the `1.3` rejection
 /// threshold and far enough from it that the fixture does not depend on the
 /// exact encoder build.
 const DISGUISE_QUALITY: u8 = 75;

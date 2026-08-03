@@ -15,8 +15,8 @@
 //!
 //! # Everything here runs on a default build
 //!
-//! Until PROMPT 6b the Syndrome-Trellis coder was an external C++ library the
-//! build linked only under the `ffi-stc` feature, so every round trip below was
+//! The Syndrome-Trellis coder used to be an external C++ library the build
+//! linked only under the `ffi-stc` feature, so every round trip below was
 //! compiled out of a default `cargo test` and the suite could only assert that
 //! the pipeline *reached* the coder. The coder is now native Rust and always
 //! present, which is why the gates are gone: a plain

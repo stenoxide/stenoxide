@@ -37,7 +37,7 @@ tempfile.workspace = true
 default = []
 # Post-quantum key encapsulation support.
 pqc = ["dep:ml-kem"]
-# DEPRECATED since PROMPT 6b. The Syndrome-Trellis coder now lives in
+# DEPRECATED. The Syndrome-Trellis coder now lives in
 # `stego::stc::native`, in safe Rust, and the crate links nothing. Enabling this
 # still compiles libsdc++ through build.rs, but no code calls into it; the
 # feature is kept only so a future comparison against the reference

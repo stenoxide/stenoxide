@@ -7,8 +7,6 @@
 //!
 //! This module holds the vocabulary of the layer: the map itself and the trait
 //! every cost model implements. The HILL model lives in [`hill`].
-//!
-//! Implemented in PROMPT 5.
 
 use std::fmt;
 use std::marker::PhantomData;

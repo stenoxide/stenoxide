@@ -355,6 +355,66 @@ fn salt_from_bits(bits: &[bool; N_HASH_BITS]) -> PHashSalt {
     PHashSalt::new(digest)
 }
 
+/// Every salt a container's perceptual hash could have produced.
+///
+/// One when the hash is fully determined; two when a single coefficient sits
+/// inside the margin, in which case the sender used one of the pair and nothing
+/// in the image says which.
+pub(crate) struct PHashHypotheses {
+    /// Salt of the bits exactly as they measure on this image.
+    ///
+    /// The one the sender used whenever the image is the unmodified cover, and
+    /// the overwhelmingly likely one even for a stego image: the uncertain
+    /// coefficient only moves if embedding happened to push it across the
+    /// median.
+    pub(crate) primary: PHashSalt,
+    /// Salt of the same bits with the uncertain one flipped, when there is one.
+    pub(crate) alternative: Option<PHashSalt>,
+}
+
+/// Enumerates the salts a container's hash can take, applying the same
+/// stability limit as [`compute_stable_phash`].
+///
+/// The extraction path needs this rather than a single salt. Its problem is
+/// circular: the payload is what tells the two hypotheses apart, and reading the
+/// payload needs the permutation seed, which is derived from the salt. It can
+/// only be broken by trying a hypothesis, extracting under it and letting
+/// [`recover_phash_salt`] judge the result — which requires being able to name
+/// the other hypothesis, and that is what this function provides.
+///
+/// # Errors
+///
+/// Returns [`PHashError::InsufficientStability`] when more than
+/// [`MAX_UNSTABLE_BITS`] coefficients sit within [`DELTA_MIN`] of the median.
+pub(crate) fn phash_salt_hypotheses(img: &ImageBuffer) -> Result<PHashHypotheses, PHashError> {
+    let hash = compute_hash_bits(img);
+    let unstable = hash.unstable_indices();
+
+    if unstable.len() > MAX_UNSTABLE_BITS {
+        return Err(PHashError::InsufficientStability {
+            unstable_bits: unstable.len(),
+            threshold: DELTA_MIN,
+        });
+    }
+
+    let alternative = unstable.first().map(|&index| {
+        let mut flipped = hash.bits;
+        // In bounds: the indices come from enumerating the margin array, which
+        // has exactly as many entries as the bit array. The fallback keeps the
+        // function total without an index panic.
+        if let Some(bit) = flipped.get_mut(index) {
+            *bit = !*bit;
+        }
+
+        salt_from_bits(&flipped)
+    });
+
+    Ok(PHashHypotheses {
+        primary: salt_from_bits(&hash.bits),
+        alternative,
+    })
+}
+
 /// Computes the perceptual hash salt of a container image, refusing images
 /// whose hash would not survive embedding.
 ///
@@ -366,17 +426,7 @@ fn salt_from_bits(bits: &[bool; N_HASH_BITS]) -> PHashSalt {
 /// care which value it takes, because the receiver resolves it through
 /// [`recover_phash_salt`].
 pub(crate) fn compute_stable_phash(img: &ImageBuffer) -> Result<PHashSalt, PHashError> {
-    let hash = compute_hash_bits(img);
-
-    let unstable = hash.unstable_indices().len();
-    if unstable > MAX_UNSTABLE_BITS {
-        return Err(PHashError::InsufficientStability {
-            unstable_bits: unstable,
-            threshold: DELTA_MIN,
-        });
-    }
-
-    Ok(salt_from_bits(&hash.bits))
+    Ok(phash_salt_hypotheses(img)?.primary)
 }
 
 /// Tests whether `ciphertext_prefix` was produced under the keys derived from a

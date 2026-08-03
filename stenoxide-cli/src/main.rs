@@ -15,7 +15,10 @@
 //! table for as long as the process runs, and in whatever the shell's own
 //! logging does with the line — three places the user cannot wipe and did not
 //! choose. The password is therefore read from the terminal with echo disabled
-//! and the message from standard input, which is a pipe and leaves no trace.
+//! and the message from standard input, which leaves no trace whether it is
+//! piped in or typed. Typing it is in fact the more private of the two: a
+//! message given to `echo` is a command line like any other and lands in the
+//! shell's history. See [`read_plaintext`] for how a typed message is ended.
 //!
 //! # Why the container is validated before the password is asked for
 //!
@@ -46,7 +49,7 @@
 #![deny(clippy::panic)]
 #![deny(missing_docs)]
 
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -73,6 +76,23 @@ const EXTRACTION_FAILED: &str = "Could not extract the payload.";
 
 /// Prompt shown when the password is read from the terminal.
 const PASSWORD_PROMPT: &str = "Password: ";
+
+/// The line that ends a message typed at the terminal.
+///
+/// The convention `mail` established, chosen over end of file for the reason
+/// given in [`read_plaintext`]: it is ordinary text, so no shell can intercept
+/// it on its way to this process.
+const END_OF_MESSAGE: &str = ".";
+
+/// What the user is told before they are expected to type a message.
+///
+/// Plain ASCII on purpose: this is printed before anything else knows whether
+/// the console can render a nicer mark, and a guidance line that arrives as a
+/// row of question marks would defeat its own point.
+const TYPING_GUIDANCE: &str = "\
+Message to hide. It may span as many lines as you need.
+Finish with a line containing a single dot:  .
+";
 
 /// Hide encrypted messages inside lossless images.
 #[derive(Parser)]
@@ -162,19 +182,116 @@ fn read_password() -> Result<Zeroizing<Vec<u8>>, String> {
         .map_err(|err| format!("Error: could not read the password: {err}"))
 }
 
-/// Reads the message to hide from standard input, until end of file.
+/// Reads the message to hide from standard input.
+///
+/// Two situations arrive at the same file descriptor, and they are not served
+/// by the same code:
+///
+/// - **A pipe or a redirection.** `echo … | stenoxide embed`, or `< message.txt`.
+///   Every byte is message, end of file arrives on its own, and nothing needs
+///   to be said to anybody. Read to the end and change nothing.
+///
+/// - **A terminal.** Nothing was piped in, so what the program is waiting for
+///   is a person typing. "Until end of file" then means "until the user sends
+///   one", and that is a worse instruction than it looks: `Ctrl+Z` on Windows
+///   only counts on an otherwise empty line, and PowerShell's line editor
+///   claims the key for undo, so the shell most Windows users are in never
+///   delivers it. The honest instruction is one they cannot act on — and until
+///   they are given any instruction at all, what they see is a cursor sitting
+///   under a password prompt with nothing to say the program wants anything,
+///   which reads as a hang.
+///
+/// So the terminal path states what it wants and accepts a terminator no line
+/// editor can intercept, because it is ordinary text: a line holding a single
+/// dot, as `mail` has done for decades. End of file still ends the message for
+/// the terminals that do send it; it is simply no longer the only way out.
 ///
 /// # Errors
 ///
 /// Returns a message describing why standard input could not be read.
 fn read_plaintext() -> Result<Zeroizing<Vec<u8>>, String> {
+    let stdin = io::stdin();
+
+    if stdin.is_terminal() {
+        // On stderr, like every other thing said to the person at the keyboard:
+        // it keeps `embed` usable with its stdout redirected, and it is the
+        // stream the progress indicators already respect.
+        eprint!("{TYPING_GUIDANCE}");
+
+        let message = collect_typed_lines(&mut stdin.lock())
+            .map_err(|err| format!("Error: could not read the message you typed: {err}"))?;
+
+        // Confirms that the terminator was recognised and that something was
+        // captured, at the one moment the user can still do something about it
+        // — the next thing that happens is a minute inside Argon2id and HILL.
+        eprintln!("Read {} bytes.", message.len());
+
+        return Ok(message);
+    }
+
     let mut plaintext = Zeroizing::new(Vec::new());
 
-    io::stdin()
+    stdin
+        .lock()
         .read_to_end(&mut plaintext)
         .map_err(|err| format!("Error: could not read the message from standard input: {err}"))?;
 
     Ok(plaintext)
+}
+
+/// Accumulates typed lines until [`END_OF_MESSAGE`] or end of file.
+///
+/// Split out from [`read_plaintext`] so that the terminator can be asserted
+/// against a buffer rather than against a console nobody can drive from a test.
+///
+/// # Errors
+///
+/// Returns whatever the underlying reader failed with.
+fn collect_typed_lines(input: &mut impl BufRead) -> io::Result<Zeroizing<Vec<u8>>> {
+    let mut message = Zeroizing::new(Vec::new());
+    let mut line = Zeroizing::new(Vec::new());
+
+    loop {
+        line.clear();
+
+        // Bytes rather than `read_line`, which insists on valid UTF-8 and would
+        // turn a message typed on a console running some other code page into
+        // an error. What the user typed is what gets hidden.
+        if input.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+
+        if strip_line_ending(&line) == END_OF_MESSAGE.as_bytes() {
+            break;
+        }
+
+        message.extend_from_slice(&line);
+    }
+
+    // The newline that submitted the last line belongs to the terminator rather
+    // than to the message: someone who typed one line and closed it with a dot
+    // meant one line, not one line and an empty second one.
+    let without_trailing_newline = strip_line_ending(&message).len();
+    message.truncate(without_trailing_newline);
+
+    Ok(message)
+}
+
+/// A line without its ending, under either of the two conventions.
+///
+/// A Windows console submits `\r\n` and everything else submits `\n`; neither
+/// pair of bytes is something the user typed, so neither may decide whether the
+/// line is the terminator.
+fn strip_line_ending(line: &[u8]) -> &[u8] {
+    let line = match line.strip_suffix(b"\n") {
+        Some(rest) => rest,
+        None => line,
+    };
+
+    match line.strip_suffix(b"\r") {
+        Some(rest) => rest,
+        None => line,
+    }
 }
 
 /// Loads a container and reports an unusable one in words the user can act on.
@@ -409,5 +526,111 @@ fn console_output_code_page() -> u32 {
     #[allow(unsafe_code)]
     unsafe {
         GetConsoleOutputCP()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    /// Runs the typed-message reader over what a console would have delivered.
+    fn typed(keystrokes: &str) -> String {
+        let mut input = io::Cursor::new(keystrokes.as_bytes().to_vec());
+        let message = collect_typed_lines(&mut input).expect("a cursor cannot fail to read");
+
+        String::from_utf8(message.to_vec()).expect("the fixtures are all UTF-8")
+    }
+
+    /// A dot on its own line ends the message and is not part of it.
+    ///
+    /// The whole reason the terminator exists: `Ctrl+Z` never reaches this
+    /// process under PowerShell, so if this line did not end the message there
+    /// would be no way to finish one at a Windows prompt.
+    #[test]
+    fn a_lone_dot_ends_the_message() {
+        assert_eq!(typed("a secret\n.\n"), "a secret");
+        assert_eq!(typed("a secret\r\n.\r\n"), "a secret");
+    }
+
+    /// Anything typed after the terminator is not read.
+    ///
+    /// The reader stops at the dot rather than draining the stream, so that
+    /// whatever the user types next belongs to their shell and not to a message
+    /// they thought they had already closed.
+    #[test]
+    fn nothing_after_the_terminator_is_taken() {
+        assert_eq!(typed("kept\n.\nnot this\n"), "kept");
+    }
+
+    /// A message may span lines, blank ones included.
+    #[test]
+    fn the_message_may_span_several_lines() {
+        assert_eq!(typed("one\ntwo\n\nfour\n.\n"), "one\ntwo\n\nfour");
+    }
+
+    /// End of file still ends the message, terminator or not.
+    ///
+    /// The dot is an addition rather than a replacement: a terminal that does
+    /// deliver `Ctrl+D` or `Ctrl+Z` keeps working exactly as it used to.
+    #[test]
+    fn end_of_file_still_ends_the_message() {
+        assert_eq!(typed("a secret\n"), "a secret");
+        assert_eq!(typed("no newline at all"), "no newline at all");
+        assert_eq!(typed(""), "");
+    }
+
+    /// A dot is only a terminator on a line of its own.
+    ///
+    /// Ordinary prose ends in one constantly, and a message truncated at its
+    /// first full stop would be a data-loss bug in the name of convenience.
+    #[test]
+    fn a_dot_within_a_line_is_text() {
+        assert_eq!(
+            typed("Meet me at six. Bring it.\n.\n"),
+            "Meet me at six. Bring it."
+        );
+        assert_eq!(typed("..\n.\n"), "..");
+        assert_eq!(typed(" .\n.\n"), " .");
+    }
+
+    /// Typing only the terminator produces nothing.
+    ///
+    /// Which is what makes `run_embed`'s empty-message check the thing that
+    /// reports it, rather than the pipeline failing later over a payload nobody
+    /// meant to send.
+    #[test]
+    fn a_message_that_is_only_the_terminator_is_empty() {
+        assert!(typed(".\n").is_empty());
+    }
+
+    /// Bytes that are not valid UTF-8 survive the trip.
+    ///
+    /// A console running a legacy code page hands over whatever it hands over,
+    /// and the message is bytes to everything downstream of here.
+    #[test]
+    fn invalid_utf8_is_carried_through_unchanged() {
+        let mut input = io::Cursor::new(b"caf\xe9\n.\n".to_vec());
+        let message = collect_typed_lines(&mut input).expect("a cursor cannot fail to read");
+
+        assert_eq!(message.as_slice(), b"caf\xe9");
+    }
+
+    /// The guidance names the terminator it expects.
+    ///
+    /// A guard against the obvious future edit: rewording the guidance without
+    /// noticing that the dot is load-bearing would leave the user with a prompt
+    /// that tells them to do something the reader does not implement.
+    #[test]
+    fn the_guidance_states_how_to_finish() {
+        assert!(
+            TYPING_GUIDANCE.contains(END_OF_MESSAGE),
+            "the guidance must name the terminator, got: {TYPING_GUIDANCE:?}"
+        );
+        assert!(
+            TYPING_GUIDANCE.is_ascii(),
+            "the guidance is printed before the console's code page is known"
+        );
     }
 }

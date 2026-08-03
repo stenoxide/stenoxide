@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 #
 # Prints the Conventional Commit changes contained in a git range, oldest first,
-# one per line, as `<kind><TAB><description>`. `kind` is one of breaking, feat,
-# fix, deps or other; it decides both the version bump the change contributes
-# and the section it is filed under in the changelog.
+# one per line, as `<kind><TAB><description><TAB><hash><TAB><author>`. `kind` is
+# one of breaking, feat, fix, deps or other; it decides both the version bump the
+# change contributes and the section it is filed under in the changelog. The
+# hash and the author are the ones of the commit the description was read from,
+# and exist so the changelog can attribute and link every line it prints.
 #
 # Usage: changes.sh [<git range>]
 #
@@ -12,6 +14,10 @@
 # commits it replaced in its body, as a `*` list. Where such a list exists it is
 # authoritative and the subject is discarded: the subject summarises the very
 # lines below it, and reading both would count the same work twice.
+#
+# Every line a squash contributes therefore carries the hash and the author of
+# the squash itself: the commits it replaced no longer exist on the branch, and
+# a link to one of them would resolve to nothing.
 
 set -euo pipefail
 
@@ -49,6 +55,7 @@ mapfile -t hashes < <(git log ${range:+"$range"} --reverse --format='%H')
 
 for hash in "${hashes[@]}"; do
     message=$(git log -1 --format='%B' "$hash")
+    author=$(git log -1 --format='%an' "$hash")
 
     bullets=$(sed -n -E "s/^[[:space:]]*[-*][[:space:]]+(${types}(\([^)]*\))?!?:[[:space:]].*)$/\1/p" \
         <<<"$message" || true)
@@ -73,7 +80,8 @@ for hash in "${hashes[@]}"; do
 
         kind=$(classify "$line")
         [ "$kind" = breaking ] && breaking_seen=1
-        printf '%s\t%s\n' "$kind" "$line"
+        # A tab inside the description would open a field that is not there.
+        printf '%s\t%s\t%s\t%s\n' "$kind" "${line//$'\t'/ }" "$hash" "$author"
     done <<<"$lines"
 
     # A BREAKING CHANGE footer makes the whole commit breaking. It is emitted
@@ -83,7 +91,7 @@ for hash in "${hashes[@]}"; do
         footers=$(grep -E '^BREAKING CHANGE:[[:space:]]' <<<"$message" || true)
         while IFS= read -r footer; do
             [ -n "$footer" ] || continue
-            printf 'breaking\t%s\n' "$footer"
+            printf 'breaking\t%s\t%s\t%s\n' "${footer//$'\t'/ }" "$hash" "$author"
         done <<<"$footers"
     fi
 done

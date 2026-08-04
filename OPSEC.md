@@ -126,7 +126,17 @@ and how much each can carry.
   yourself.
 - Screenshots, AI-generated images, renders, vector graphics saved as PNG,
   scanned documents. Synthetic content has statistics of its own that a detector
-  models more easily than a photograph's.
+  models more easily than a photograph's — and worse, the generator that made it
+  is usually public, so an adversary can draw from the same source without limit
+  and knows the distribution you were hiding in. That is the strongest position
+  a steganalyst can occupy and a photograph never grants it.
+
+  This says nothing against `stenoxide generate`, and the difference is worth
+  being precise about. Taking a synthetic image and *embedding* into it is the
+  case above and stays discouraged. Generating a container *around* the payload
+  is a different construction, and the fact that the adversary holds the
+  generator does not help them: the samples are drawn conditioned on the bits
+  they carry, so the two hypotheses are one distribution. See below.
 - Anything below 2000x2000.
 
 ### Why these restrictions exist
@@ -222,6 +232,80 @@ survives an adversary holding the actual cover: subtracting the two images
 reveals every changed pixel directly, with no statistics involved. A published
 photograph, a stock image, anything from a search result — the comparison is
 available to anyone who thinks to look, and no embedding scheme survives it.
+
+## When you have no container at all
+
+Everything above assumes a photograph, and the assumption fails for real people:
+a laptop with no easy way to take pictures off a phone, a camera that only ever
+writes JPEG or HEIC. Both formats are refused at the door — they are lossy and
+leave the 8x8 grid — and converting one to PNG does not remove it. For that
+situation there is `stenoxide generate`, which builds a container around the
+message instead of hiding the message in a container.
+
+**Read this section before using it.** It is the only mode whose guarantee is
+narrower than it sounds.
+
+### What it does guarantee, and it is a strong claim
+
+Every sample of the image is drawn from the texture's own distribution
+*conditioned* on the ciphertext bit it has to carry. Because the two parities
+carry equal mass, mixing them over a uniform bit reproduces the unconditioned
+distribution exactly, so a container generated around a message and a container
+generated around nothing are draws from **one** distribution. There is no
+statistic that separates them, no detector that beats a coin toss, and no future
+model that changes it — not because the difference is well hidden but because
+there is no difference.
+
+That also lifts the rate cap, which exists only because the sender does not know
+a photograph's statistics. Here the sender *is* the distribution, so every sample
+carries a bit: a generated container holds about 1.45 MB where an image of the
+same size admits about 8 KB by embedding.
+
+And the rule at the top of this document holds by itself. Every generation is a
+new container with a different perceptual hash, so the salt, the key and the
+nonce differ whether you remember to change anything or not.
+
+### What it does not guarantee, and this is the part that matters
+
+**It hides which, not whether.** The hypotheses it equalises are "generated
+around a message" and "generated around nothing". It says nothing whatever about
+"generated" against "photographed". The container looks like a synthetic stone
+texture, because the perceptual hash demands energy at a scale that cannot be
+concealed, and a folder of such images is a thing nobody has an obvious reason
+to own.
+
+Against the question "which of these hundred images carries the message?" it is
+a complete answer. Against the question "why do you have this folder?" it is no
+answer at all — and that second question is the one an adversary looking at your
+disk will actually ask. The strongest analysis of the file is irrelevant when
+the file's existence is the evidence.
+
+### So where it stands against the alternatives
+
+- **An unpublished photograph of your own is still better**, and by a wide
+  margin, because it is unremarkable. Use one whenever you have one.
+- **Against embedding into a generated image, this is better, not worse.** They
+  sound alike and they are not: generating a picture and then embedding into it
+  is the weaker construction on every axis — a fraction of the capacity, and a
+  container an adversary holding the generator can model. Generating *around*
+  the payload is what makes the two hypotheses identical. If you were going to
+  do the first, do this instead.
+- **Against sending nothing, it is a real option.** It is a last resort and it
+  is a working one.
+
+### Using it without giving it away
+
+- **The container needs a reason to exist in that conversation**, exactly as a
+  photograph does. This is where the mode is weakest, and it is entirely on you.
+- **Do not keep a folder of them.** One image that arrives once is a very
+  different thing from a hundred sitting on a disk.
+- **The transport rules do not change.** Send it as an uncompressed file. A
+  channel that re-encodes destroys a generated container as thoroughly as any
+  other.
+- **Nothing tells the recipient which mode you used.** `extract` reads both
+  kinds without being told and fails identically on both, so an intercepted
+  image plus a candidate password reveals neither the message nor the
+  construction.
 
 ## Choosing a password
 

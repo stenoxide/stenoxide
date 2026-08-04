@@ -1,5 +1,10 @@
 # Changelog
 
+## [3.7.4] - 2026-08-04
+
+### Other Changes
+- bump version to 3.7.3 by hand — [@adrian-cancio](https://github.com/adrian-cancio) ([`1f748bf`](https://github.com/stenoxide/stenoxide/commit/1f748bf77494c09e73f881ea73ec8357b31d2cd1))
+
 ## [3.7.2] - 2026-08-04
 
 ### Breaking Changes

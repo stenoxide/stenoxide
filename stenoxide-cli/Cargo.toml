@@ -20,7 +20,7 @@ path = "src/main.rs"
 [dependencies]
 # The version requirement is what a published build resolves against: `path`
 # only exists inside this workspace and is dropped when the crate is packaged.
-stenoxide-core = { path = "../stenoxide-core", version = "3.7.2" }
+stenoxide-core = { path = "../stenoxide-core", version = "3.7.4" }
 clap.workspace = true
 rpassword.workspace = true
 zeroize.workspace = true

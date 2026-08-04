@@ -28,11 +28,7 @@ use crate::image_io::jpeg_detect;
 ///
 /// Smaller containers do not offer enough embeddable samples for the STC
 /// encoder to stay below the `max_bpp` limit while carrying a useful payload.
-///
-/// Readable inside the crate rather than private to this module: the generator
-/// sizes its containers against the very same floor, so that a container it
-/// draws is one this loader would accept back.
-pub(crate) const MIN_DIMENSION: u32 = 2000;
+const MIN_DIMENSION: u32 = 2000;
 
 /// Largest container the analysis will attempt, in pixels.
 ///
@@ -51,11 +47,7 @@ pub(crate) const MIN_DIMENSION: u32 = 2000;
 ///
 /// The limit is far above any camera: a 100-megapixel medium-format back
 /// produces a quarter of it, and the largest consumer sensor a tenth.
-///
-/// Readable inside the crate rather than private to this module, for the reason
-/// given on [`MIN_DIMENSION`]: the generator caps the containers it draws at the
-/// same ceiling the loader refuses above.
-pub(crate) const MAX_PIXELS: u64 = 128 * 1024 * 1024;
+const MAX_PIXELS: u64 = 128 * 1024 * 1024;
 
 /// Number of leading bytes required before any format probing can be trusted.
 const MIN_HEADER_LEN: usize = 12;

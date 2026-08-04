@@ -437,42 +437,6 @@ fn a_container_too_large_to_analyse_is_refused_immediately() {
     );
 }
 
-/// TEST 29 — a scan that accepts nothing says what a user can do instead.
-///
-/// The only place `stenoxide generate` is mentioned by the tool itself, and the
-/// condition is the point: a user who has run a scan over their pictures and
-/// been told that none of them work has demonstrated that they looked. The same
-/// line printed to someone holding a usable photograph would be an invitation
-/// to pick the weaker of the two constructions for no reason.
-///
-/// Driven through the process because the placement matters — it is the last
-/// thing the report says, after the summary — and because the JSON form must
-/// not carry it: a document with an English sentence appended is not a document.
-#[test]
-fn a_scan_that_accepts_nothing_points_at_the_generative_mode() {
-    let directory = TempDir::new().expect("temporary directory");
-    place_undersized(directory.path(), "small.png");
-    place_jpeg(directory.path(), "photo.jpg");
-
-    let path = directory.path().to_string_lossy().into_owned();
-    let listing = stdout_of(&stenoxide(&["scan", &path]));
-
-    assert!(listing.contains("stenoxide generate"), "got: {listing}");
-    assert!(
-        listing.contains("does not hide that it was generated"),
-        "the offer must state what the mode does not do: {listing}"
-    );
-
-    // A document is a document.
-    let document = stdout_of(&stenoxide(&["scan", &path, "--json"]));
-    assert!(!document.contains("stenoxide generate"), "got: {document}");
-
-    // And one usable container is enough to make the advice wrong.
-    place_cover(directory.path(), "usable.png");
-    let mixed = stdout_of(&stenoxide(&["scan", &path]));
-    assert!(!mixed.contains("stenoxide generate"), "got: {mixed}");
-}
-
 /// The set of top-level keys of a JSON object.
 ///
 /// A parser sufficient for the question being asked: the document this crate

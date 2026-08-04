@@ -46,23 +46,6 @@ const PATH_COLUMN: usize = 28;
 /// Column width of the dimensions in the default listing.
 const SIZE_COLUMN: usize = 11;
 
-/// What a scan that accepted nothing says at the end of its summary.
-///
-/// The one place `stenoxide generate` is offered, and it is offered rather than
-/// proposed: no prompt, no yes-or-no, nothing that turns a scan into a
-/// decision. A user who has run `scan` over their pictures and been told that
-/// none of them can be used has demonstrated that they looked, which is exactly
-/// the person the generative mode exists for — and nobody else.
-///
-/// It says what the mode does not do in the same breath as what it does,
-/// because someone in this position will otherwise read "undetectable" as
-/// covering the folder as well as the file.
-const NOTHING_USABLE_HINT: &str = "\n\
-  None of these can be used as a container.\n\
-  stenoxide generate builds one around your message instead. It is a last\n\
-  resort: the container does not hide that it was generated, only which of\n\
-  several generated containers carries anything.\n";
-
 /// What a scan found in one file.
 enum Verdict {
     /// The file is a container, and this is what it can carry.
@@ -567,10 +550,6 @@ fn render_listing(argument: &str, entries: &[Entry], all: bool) -> String {
         let _ = writeln!(report, "  Run with --all to see why an image was rejected.");
     }
 
-    if usable == 0 && scanned > 0 {
-        let _ = write!(report, "{NOTHING_USABLE_HINT}");
-    }
-
     report
 }
 
@@ -827,43 +806,6 @@ mod tests {
             rendered.contains("Summary: 1 valid, 1 invalid (2 scanned)"),
             "got: {rendered}"
         );
-    }
-
-    /// A scan that accepted nothing names the way out; one that accepted
-    /// something does not.
-    ///
-    /// The condition is the whole design of this line. It is advice for a user
-    /// who has looked and has nothing, and noise — or worse, a suggestion to
-    /// use the weaker mode — for anyone holding a usable photograph.
-    #[test]
-    fn only_a_scan_that_found_nothing_offers_to_generate_a_container() {
-        let refused = vec![Entry {
-            path: PathBuf::from("a.png"),
-            verdict: Verdict::Unusable {
-                reason: "JpegDetected",
-                dimensions: None,
-            },
-        }];
-
-        let listing = render_listing(".", &refused, true);
-        assert!(listing.contains("stenoxide generate"), "got: {listing}");
-        assert!(
-            listing.contains("does not hide that it was generated"),
-            "the offer must state what the mode does not do: {listing}"
-        );
-
-        let mut mixed = refused;
-        mixed.push(Entry {
-            path: PathBuf::from("b.png"),
-            verdict: Verdict::Usable {
-                dimensions: (2000, 2000),
-                capacity_bytes: 8_300,
-            },
-        });
-        assert!(!render_listing(".", &mixed, true).contains("stenoxide generate"));
-
-        // Nothing was scanned at all, so there is nothing to conclude from.
-        assert!(!render_listing(".", &[], true).contains("stenoxide generate"));
     }
 
     /// Without `--all` the listing points at the flag that would explain a

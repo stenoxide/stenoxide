@@ -1514,7 +1514,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stenoxide-cli"
-version = "1.7.2"
+version = "3.7.2"
 dependencies = [
  "clap",
  "image",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "stenoxide-core"
-version = "1.7.2"
+version = "3.7.2"
 dependencies = [
  "argon2",
  "cc",

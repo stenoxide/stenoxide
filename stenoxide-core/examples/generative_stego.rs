@@ -72,12 +72,6 @@ use stenoxide_core::test_support::incompressible_payload;
 
 /// Side length of the containers, in pixels.
 const SIDE: u32 = 2000;
-/// Control-grid resolution of the low-frequency field.
-const FIELD_GRID: usize = 32;
-/// Peak deviation of the field from mid grey, in levels.
-const FIELD_AMPLITUDE: f32 = 95.0;
-/// Share of a cell spent easing between control values.
-const FIELD_EDGE_WIDTH: f32 = 0.25;
 /// Standard deviation of the grain, in levels. The security parameter: the
 /// LSB bias decays as `exp(-2 pi^2 sigma^2)`, so this is what makes the coin
 /// fair. Anything below about 1.5 starts to leak.
@@ -135,10 +129,10 @@ fn generate_and_verify(path: &Path, seed: u64, message: &[u8], password: &[u8]) 
     let kdf = Argon2Kdf::low_cost_for_tests();
 
     for candidate in seed..seed + MAX_FIELD_CANDIDATES {
-        let planes = field_planes(candidate);
+        let noise = Noise::new(candidate);
 
         // Draft container: grain drawn freely. Its only job is to fix the hash.
-        let draft = render(&planes, candidate, None);
+        let draft = render(&noise, candidate, None);
         let Some(draft_salt) = gated_salt(&draft, path) else {
             continue;
         };
@@ -149,7 +143,7 @@ fn generate_and_verify(path: &Path, seed: u64, message: &[u8], password: &[u8]) 
             .expect("encryption");
 
         // Final container: same field, grain conditioned on the ciphertext.
-        let final_image = render(&planes, candidate, Some(&ciphertext));
+        let final_image = render(&noise, candidate, Some(&ciphertext));
         final_image
             .save_with_format(path, ImageFormat::Png)
             .expect("container should be writable");
@@ -183,7 +177,7 @@ fn generate_and_verify(path: &Path, seed: u64, message: &[u8], password: &[u8]) 
 /// Generates a container carrying no payload, by the same code path.
 fn generate_blank(path: &Path, seed: u64) {
     for candidate in seed..seed + MAX_FIELD_CANDIDATES {
-        let image = render(&field_planes(candidate), candidate, None);
+        let image = render(&Noise::new(candidate), candidate, None);
         if gated_salt(&image, path).is_some() {
             return;
         }
@@ -213,16 +207,16 @@ fn gated_salt(image: &RgbImage, path: &Path) -> Option<PHashSalt> {
 
 /// Renders the container. With `carrier` present, every sample's least
 /// significant bit is drawn to equal the corresponding ciphertext bit.
-fn render(planes: &[Vec<f32>], seed: u64, carrier: Option<&[u8]>) -> RgbImage {
+fn render(noise: &Noise, seed: u64, carrier: Option<&[u8]>) -> RgbImage {
     let mut rng = StdRng::seed_from_u64(seed ^ 0xC0FFEE);
     let carrier_bits = carrier.map_or(0, |c| c.len() * 8);
     let mut position = 0usize;
 
     RgbImage::from_fn(SIDE, SIDE, |x, y| {
         let mut channels = [0u8; 3];
-        for (channel, plane) in channels.iter_mut().zip(planes.iter()) {
-            let base = 128.0 + sample_field(plane, x, y);
+        let base_levels = pebbles(noise, x, y);
 
+        for (channel, &base) in channels.iter_mut().zip(base_levels.iter()) {
             *channel = match carrier {
                 Some(bytes) if position < carrier_bits => {
                     let bit = (bytes[position / 8] >> (7 - position % 8)) & 1;
@@ -276,39 +270,76 @@ fn read_bits(image: &RgbImage, bytes: usize) -> Vec<u8> {
     out
 }
 
-/// Draws one control grid per channel.
-fn field_planes(seed: u64) -> Vec<Vec<f32>> {
-    let mut rng = StdRng::seed_from_u64(seed);
-    (0..3).map(|_| control_grid(&mut rng)).collect()
+/// The container texture: Worley cells sized to one thumbnail pixel.
+///
+/// Chosen by measurement, not taste. The perceptual-hash gate reads DCT
+/// coefficients 1..=64 of a 32x32 thumbnail in row-major order — the whole
+/// first row of pure horizontal frequencies, then the second — so it demands
+/// energy at the thumbnail's own scale, which for a 2000px container is 62.5
+/// pixels. A sweep over that range accepts at 6/6 seeds exactly there and 0/6
+/// at eight times it, which is why fractal noise and marble are refused: their
+/// `1/f` spectrum starves the coefficients the gate reads.
+///
+/// That scale is therefore going to be visible whatever is done, so the texture
+/// makes it the motif rather than fighting it. Cells with independent levels
+/// feed the coefficients; the ridge between them is what reads as stone.
+fn pebbles(noise: &Noise, x: u32, y: u32) -> [f32; 3] {
+    let scale = SIDE as f32 / 32.0;
+    let (fx, fy) = (x as f32 / scale, y as f32 / scale);
+    let (cx, cy) = (fx.floor() as i32, fy.floor() as i32);
+    let (mut first, mut second) = (f32::MAX, f32::MAX);
+    let mut nearest_id = 0u64;
+
+    for oy in -1..=1 {
+        for ox in -1..=1 {
+            let (gx, gy) = (cx + ox, cy + oy);
+            let px = gx as f32 + noise.unit(gx, gy, 11);
+            let py = gy as f32 + noise.unit(gx, gy, 13);
+            let distance = (fx - px).hypot(fy - py);
+            if distance < first {
+                second = first;
+                first = distance;
+                nearest_id = noise.hash(gx, gy, 17);
+            } else if distance < second {
+                second = distance;
+            }
+        }
+    }
+
+    let cell_level = ((nearest_id >> 40) as f32 / 16_777_216.0 - 0.5) * 150.0;
+    let ridge = ((second - first) * 90.0).min(30.0);
+    let level = 128.0 + cell_level + ridge - 15.0;
+
+    // Kept well clear of both ends of the range: the rejection sampler needs
+    // both parities reachable at every base level.
+    let clamped = level.clamp(24.0, 231.0);
+    [clamped, clamped * 0.98 + 3.0, clamped * 0.94 + 8.0]
 }
 
-/// Two-valued control grid; see `test_support` for why the extremes.
-fn control_grid(rng: &mut StdRng) -> Vec<f32> {
-    let side = FIELD_GRID + 1;
-    (0..side * side)
-        .map(|_| if rng.random_bool(0.5) { FIELD_AMPLITUDE } else { -FIELD_AMPLITUDE })
-        .collect()
+/// Integer-hashed value noise, self-contained.
+struct Noise {
+    seed: u64,
 }
 
-/// Interpolates the control grid: flat plateaus joined by eased shoulders.
-fn sample_field(grid: &[f32], x: u32, y: u32) -> f32 {
-    let scale = FIELD_GRID as f32 / SIDE as f32;
-    let (fx, fy) = (x as f32 * scale, y as f32 * scale);
-    let (x0, y0) = (fx as usize, fy as usize);
-    let (tx, ty) = (shoulder(fx - x0 as f32), shoulder(fy - y0 as f32));
+impl Noise {
+    fn new(seed: u64) -> Self {
+        Self { seed: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1 }
+    }
 
-    let stride = FIELD_GRID + 1;
-    let at = |gx: usize, gy: usize| grid.get(gy * stride + gx).copied().unwrap_or(0.0);
+    fn hash(&self, x: i32, y: i32, channel: i32) -> u64 {
+        let mut h = self.seed
+            ^ (x as i64 as u64).wrapping_mul(0xA24B_AED4_963E_E407)
+            ^ (y as i64 as u64).wrapping_mul(0x9FB2_1C65_1E98_DF25)
+            ^ (channel as i64 as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+        h ^= h >> 32;
+        h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+        h ^= h >> 29;
+        h
+    }
 
-    let top = at(x0, y0) * (1.0 - tx) + at(x0 + 1, y0) * tx;
-    let bottom = at(x0, y0 + 1) * (1.0 - tx) + at(x0 + 1, y0 + 1) * tx;
-    top * (1.0 - ty) + bottom * ty
-}
-
-/// The eased shoulder: flat outside the middle `FIELD_EDGE_WIDTH` of a cell.
-fn shoulder(t: f32) -> f32 {
-    let eased = ((t - 0.5) / FIELD_EDGE_WIDTH + 0.5).clamp(0.0, 1.0);
-    eased * eased * (3.0 - 2.0 * eased)
+    fn unit(&self, x: i32, y: i32, channel: i32) -> f32 {
+        (self.hash(x, y, channel) >> 40) as f32 / 16_777_216.0
+    }
 }
 
 /// One normal sample by Box-Muller, cosine half only.

@@ -199,6 +199,35 @@ exist; this generates one, which is a different entry point — a payload-length
 header and an extraction path that does not run the trellis at all, since there
 are no costs to minimise when every position is equally free.
 
+## Shape this would take, if it is ever built
+
+Nothing here is implemented in the product, and this section is a record of a
+design decision rather than a plan being executed.
+
+**An explicit `stenoxide generate`, not a prompt on a missing argument.** The
+tempting interface is to notice that `embed` was given no container and offer to
+make one. It is the wrong place for it twice over. A user who omitted `--input`
+made a typo and is not asking to change their security model, so the offer turns
+a slip into a hurried decision; and the operation that fits behind such a prompt
+is *generate then embed*, which is the weaker of the two constructions — the
+convenient path would deliver the worse column of the table above. The
+discoverability belongs in `scan` instead: when it walks a directory and accepts
+nothing, one informative line. That user has already demonstrated they looked.
+
+This also matters for a rule the tool cannot otherwise enforce. "One image + one
+password = one message" is today a matter of the user's discipline; a container
+generated per message satisfies it by construction.
+
+**Open questions, none of them interface.** How the payload length reaches the
+receiver without leaking the message size — filling the container to the last
+sample and carrying the length inside the authenticated plaintext looks right,
+and costs a megabyte of cipher per send. How extraction tells a generated
+container from an embedded one without a marker and without a failure that says
+which — trying both under one derivation, since the salt is the same hash, may
+be enough. And whether grain that imitates a real sensor, whose amplitude
+follows luminance, keeps every region above the sigma the argument needs, or
+whether the dark regions have to be excluded from carrying anything.
+
 ## Running it
 
 ```sh

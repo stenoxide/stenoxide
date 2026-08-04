@@ -150,7 +150,7 @@ hash the same by decrypting it back.
 
 | | embedding into a synthetic cover | generating around the payload |
 |---|---|---|
-| capacity, 2000x2000 | ~7 KB | **1 MB** (1 bit per sample) |
+| capacity, 2000x2000 | ~7 KB | **1.45 MB** (1 bit per sample) |
 | samples changed | 6747 of 12,000,000 | none — nothing is changed |
 | optimal detector | AUC 0.586 | **AUC 0.500, provably** |
 | picking 1 of 100 | 2.09% | **exactly 1%** |
@@ -185,10 +185,10 @@ cover histogram's natural imbalance. The test can convict, and it does not.
 **It hides which, not whether.** The two hypotheses it equalises are "generated
 around a message" and "generated around nothing". It says nothing about
 "generated" versus "photographed" — the container still looks like a mosaic of
-coloured cells, and an adversary looking at the folder still sees a hundred
-images nobody has a reason to own. Against the folder-of-100 question this is a
-complete answer; against the question of why the folder exists it is no answer
-at all.
+a synthetic texture — see Part III for what it looks like now — and an
+adversary looking at the folder still sees a hundred images nobody has an
+obvious reason to own. Against the folder-of-100 question this is a complete
+answer; against the question of why the folder exists it is no answer at all.
 
 **The seed stays key material.** No cover exists to subtract, but an adversary
 who can reproduce the generator's RNG state regenerates the container and
@@ -308,32 +308,40 @@ This also matters for a rule the tool cannot otherwise enforce. "One image + one
 password = one message" is today a matter of the user's discipline; a container
 generated per message satisfies it by construction.
 
-**Open questions, none of them interface.** How the payload length reaches the
-receiver without leaking the message size — filling the container to the last
-sample and carrying the length inside the authenticated plaintext looks right,
-and costs a megabyte of cipher per send. How extraction tells a generated
-container from an embedded one without a marker and without a failure that says
-which — trying both under one derivation, since the salt is the same hash, may
-be enough. And whether grain that imitates a real sensor, whose amplitude
-follows luminance, keeps every region above the sigma the argument needs, or
-whether the dark regions have to be excluded from carrying anything.
+The three questions that were open when this section was first written — the
+payload length, the disambiguation of the two container kinds, and whether
+sensor-like grain leaves regions too quiet to carry anything — are answered in
+Part III above. Nothing remains that decides whether this is buildable.
 
-## Running it
+## Running any of it
+
+Every harness judges its candidates with the production gates rather than a
+reimplementation of them, so a result here is a result about `stenoxide`.
 
 ```sh
-cargo run --release --example generative_stego --features test-utils -- gen 16 1000000
-python scripts/synthetic_cover_analysis/indistinguishability.py gen
-python scripts/synthetic_cover_analysis/one_in_n.py
-```
-
-## Running the Part I harness
-
-```sh
+# Part I — embedding into a generated cover, and what a detector makes of it
 cargo run --release --example synthetic_cover_probe --features test-utils -- out 10
 python scripts/synthetic_cover_analysis/oracle.py out            # what changed
 python scripts/synthetic_cover_analysis/informed_detector.py out # can it be seen
 python scripts/synthetic_cover_analysis/optimal_bound.py         # could it ever be
+
+# Part II — generating the container around the payload
+cargo run --release --example generative_stego --features test-utils -- gen 16 1000000
+python scripts/synthetic_cover_analysis/indistinguishability.py gen
+python scripts/synthetic_cover_analysis/one_in_n.py
+
+# Part III — what the gates permit, and what the construction needs
+cargo run --release --example container_families --features test-utils -- fam
+cargo run --release --example phash_scale_sweep --features test-utils -- sweep
+cargo run --release --example extract_disambiguation --features test-utils -- gen
+python scripts/synthetic_cover_analysis/minimum_sigma.py
 ```
 
-`optimal_bound.py` needs only NumPy and no images; the other two need Pillow and
-the pairs. Ten pairs take a few minutes, most of it spent generating containers.
+`optimal_bound.py`, `one_in_n.py` and `minimum_sigma.py` are closed-form and
+need only NumPy; the rest need Pillow and the images. The Rust harnesses spend
+almost all their time generating and validating containers — a few minutes for
+ten of them, and `phash_scale_sweep` renders 78, so give it a quarter of an
+hour.
+
+`extract_disambiguation` reads the containers `generative_stego` wrote, so run
+that one first and point both at the same directory.

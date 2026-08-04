@@ -12,6 +12,10 @@ has the hardest time finding them. The keys come from the password and from the
 image itself: nothing but the payload bits travels in the container — no header,
 no salt, no nonce, no marker of any kind.
 
+When there is no usable photograph to hide a message in, `stenoxide generate`
+builds a container around the message instead. It is a last resort with a
+narrow guarantee, and it is described under [Generate](#generate).
+
 ## How it works
 
 1. **Container validation.** The image is loaded, checked for size and format,
@@ -174,6 +178,56 @@ When `--payload` is given, standard input is not read at all, and a path that
 does not exist, names a folder, or is empty is refused before the passphrase is
 asked for.
 
+### Generate
+
+Every requirement above assumes a photograph, and some people do not have one:
+a camera that only writes JPEG, no comfortable way to move pictures across from
+a phone. JPEG and HEIC are refused at the door — they are lossy and leave the
+8x8 grid the detector looks for — and converting one to PNG does not remove it.
+For that user, `generate` builds a container around the message rather than
+hiding the message inside a container:
+
+```sh
+stenoxide generate --output container.png --input message.txt
+```
+
+The default container is 2000x2000, the smallest and least conspicuous the mode
+draws. Capacity grows with the pixel count, so a payload that overflows the
+default needs a larger container — raise both sides together, each at least
+2000:
+
+```sh
+stenoxide generate --output container.png --input big.bin --width 2500 --height 2500
+```
+
+The refusal printed when a payload does not fit already names a size that would
+hold it, so this is rarely a number you have to work out yourself.
+
+It is a different construction, not a convenience. Each sample of the image is
+drawn from the texture's own distribution *conditioned* on the ciphertext bit it
+carries, so a container holding a message and one holding nothing are draws from
+the same distribution: there is nothing for a detector to separate, whatever it
+is trained on. That also lifts the rate cap, which exists only because a
+photograph's statistics are unknown to the sender — here every sample carries a
+bit:
+
+| | embedding into a photograph | generating around the payload |
+|---|---|---|
+| capacity, 2000x2000 | ~8 KB | **1.45 MB** |
+| samples changed | a few thousand | none — nothing is changed |
+| optimal detector | hard to beat | **provably a coin toss** |
+
+**It hides which, not whether.** What it equalises is "generated around a
+message" against "generated around nothing". It says nothing about "generated"
+against "photographed": the container looks like a synthetic texture, and a
+folder full of them is conspicuous in a way no property of any single file is.
+Against "which of these hundred carries the message?" it is a complete answer;
+against "why do you have this folder?" it is no answer at all. Use a photograph
+of your own that has never been published whenever you have one.
+
+`extract` reads both kinds of container without being told which it was given,
+and fails identically on both.
+
 ### Extract
 
 ```sh
@@ -215,6 +269,9 @@ One more condition the tool cannot check: **the container must not exist
 anywhere else.** An adversary who finds the original subtracts the two images
 and sees every changed pixel at once. See [OPSEC.md](OPSEC.md), which explains
 each of these in full.
+
+If nothing you own satisfies all of them, [Generate](#generate) is the way
+through, with the limitation described there.
 
 ## Crates
 

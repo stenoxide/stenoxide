@@ -12,6 +12,13 @@
 //!    transfer, so that sensitive buffers are dropped and zeroed as early as
 //!    possible.
 //!
+//! Beside them, and composed of the same parts, [`generate`] builds a container
+//! *around* a payload rather than hiding a payload inside one. It is a second
+//! entry point rather than a sixth layer: it reuses layers 1 and 2 whole, and
+//! layers 3 and 4 take no part in it at all, because there is no cost to
+//! minimise when every position of a container one draws oneself is equally
+//! free.
+//!
 //! ## Linting policy
 //!
 //! Fallible operations must be expressed through `Result`. Panicking helpers and
@@ -27,6 +34,7 @@
 
 pub mod cost;
 pub mod crypto;
+pub mod generate;
 pub mod image_io;
 pub mod pipeline;
 pub mod stego;

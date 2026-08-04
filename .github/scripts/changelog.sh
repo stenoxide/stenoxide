@@ -14,7 +14,7 @@
 #
 # Each entry is printed as its description, attributed and linked:
 #
-#     - **cli**: read the payload from a file — Ada Lovelace ([`0794b7d`](…))
+#     - **cli**: read the payload from a file — [@ada](…) ([`0794b7d`](…))
 #
 # What is *not* printed is the Conventional Commit prefix. The type is already
 # the heading the entry sits under, so repeating it adds nothing, and the scope
@@ -22,6 +22,13 @@
 # that name the process which produced the change rather than the code it
 # touched — `prompt-9`, `prompt-12` — are dropped: they mean something to
 # whoever ran the work and nothing at all to whoever is reading the release.
+#
+# The author is the GitHub account, linked to its profile, not the name in the
+# commit. A name is whatever `user.name` happened to be set to on the machine
+# that made the commit; it identifies nobody, links nowhere, and the same person
+# can appear under two spellings in one release. Resolving it costs one API call
+# per commit, cached, and falls back to the committed name when the account
+# cannot be determined — an unlinked email address, or no network.
 
 set -euo pipefail
 
@@ -33,8 +40,50 @@ date=${3:-$(date +%Y-%m-%d)}
 # one per heading: the input is a pipe and can only be read once.
 declare -A entries=()
 
+# `owner/name`, which is what the API is addressed by. Derived from the URL so
+# that the caller has one thing to pass rather than two that could disagree.
+slug=${repo_url#*://*/}
+
+# hash -> GitHub login, or the empty string for a hash already looked up and
+# found to have no account behind it. A squash contributes one line per commit
+# it replaced, all carrying its own hash, so the cache is what keeps a merge of
+# twenty commits from making twenty identical requests.
+declare -A logins=()
+
+# Answers in `REPLY` rather than on stdout, and so must be called outside a
+# command substitution: a subshell would throw the cache away on return and
+# every line of a twenty-commit squash would cost its own request.
+resolve_login() {
+    local hash=$1
+    REPLY=
+
+    [ -n "$repo_url" ] || return 0
+    if [ -n "${logins[$hash]+set}" ]; then
+        REPLY=${logins[$hash]}
+        return 0
+    fi
+
+    # Never fatal. Attribution is worth an API call, not a failed release: any
+    # error here leaves the committed name in place and the section still
+    # renders.
+    local login
+    if ! login=$(gh api "repos/${slug}/commits/${hash}" --jq '.author.login // empty' 2>/dev/null); then
+        login=
+    fi
+
+    # A failed `gh` reports the error as JSON on standard output, so the exit
+    # code is not enough on its own — the error document would otherwise be
+    # pasted in as the author's name. Anything not shaped like a handle goes.
+    case $login in
+        '' | *[!A-Za-z0-9-]*) login= ;;
+    esac
+
+    logins[$hash]=$login
+    REPLY=$login
+}
+
 format() {
-    local line=$1 hash=$2 author=$3
+    local line=$1 hash=$2 author=$3 login=$4
     local scope= description=$line
 
     if [[ $line =~ ^[a-z]+(\(([^\)]*)\))?!?:[[:space:]]+(.*)$ ]]; then
@@ -53,12 +102,16 @@ format() {
     local link="\`${short}\`"
     [ -n "$repo_url" ] && link="[\`${short}\`](${repo_url}/commit/${hash})"
 
-    printf -- '- %s%s — %s (%s)\n' "$prefix" "$description" "$author" "$link"
+    local credit=$author
+    [ -n "$login" ] && credit="[@${login}](https://github.com/${login})"
+
+    printf -- '- %s%s — %s (%s)\n' "$prefix" "$description" "$credit" "$link"
 }
 
 while IFS=$'\t' read -r kind line hash author; do
     [ -n "$kind" ] || continue
-    entries[$kind]+=$(format "$line" "$hash" "$author")$'\n'
+    resolve_login "$hash"
+    entries[$kind]+=$(format "$line" "$hash" "$author" "$REPLY")$'\n'
 done
 
 section() {

@@ -105,6 +105,12 @@ jobs:
 
       - name: Generate changelog
         if: steps.version.outputs.release == 'true'
+        # Read by `gh` inside changelog.sh, which asks the API which account is
+        # behind each commit so the entry can credit it by handle. Without a
+        # token the lookup fails quietly and the entries fall back to the name
+        # recorded in the commit.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           LAST_TAG=${{ steps.version.outputs.last_tag }}
 

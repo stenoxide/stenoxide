@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(/scripts/**)",
+      "Read(/stenoxide-core/examples/**)"
+    ]
+  }
+}

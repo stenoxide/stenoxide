@@ -191,9 +191,37 @@ Message to hide. It may span as many lines as you need.
 Finish with a line containing a single dot:  .
 ";
 
+/// The whole of what `stenoxide --help` prints.
+///
+/// `clap` replaces rather than extends: the moment `long_about` has content it
+/// becomes the entire body of the long help, and the sentence `about` carries
+/// would simply vanish from it. So that sentence opens this text — read from the
+/// manifest, the same place `about` reads it, rather than copied where the two
+/// could drift apart — and the examples follow. The short help is untouched and
+/// still prints that one sentence alone.
+///
+/// What the examples add is the one thing the list of commands underneath
+/// cannot: the order. A reader sees four verbs and no indication that `scan`
+/// comes first and `extract` last.
+///
+/// `completions` and `man` are deliberately left out. They are installation
+/// utilities rather than steps of the flow, they are already visible in the list
+/// clap prints below, and naming them here would dilute the only thing this text
+/// exists to say.
+const CLI_LONG_ABOUT: &str = concat!(
+    env!("CARGO_PKG_DESCRIPTION"),
+    "\n\n",
+    "Find a photograph that can hold a message, hide one in it, read it back:\n\n",
+    "  stenoxide scan ./photos\n",
+    "  stenoxide embed --input photo.png --output stego.png\n",
+    "  stenoxide extract --input stego.png\n\n",
+    "When none of the photographs can be used, stenoxide generate builds a\n",
+    "container around the message instead."
+);
+
 /// Hide encrypted messages inside lossless images.
 #[derive(Parser)]
-#[command(name = "stenoxide", version, about, long_about = None)]
+#[command(name = "stenoxide", version, about, long_about = CLI_LONG_ABOUT)]
 struct Cli {
     /// Operation to perform.
     #[command(subcommand)]
@@ -1633,6 +1661,35 @@ mod tests {
                         && payload.as_deref() == Some(Path::new("secret.zip"))
             ),
             "embed must still parse into the same three paths"
+        );
+    }
+
+    /// The long help opens with the short one and names the four verbs in order.
+    ///
+    /// Two failures this guards against, both invisible until someone runs the
+    /// binary. Dropping the description would silently remove it from
+    /// `--help` — `clap` replaces the short text with the long one rather than
+    /// printing both — and rewording the examples until a verb disappears would
+    /// leave the flow half-explained, which is the whole reason the text exists.
+    #[test]
+    fn the_long_help_opens_with_the_short_one() {
+        assert!(
+            CLI_LONG_ABOUT.starts_with(env!("CARGO_PKG_DESCRIPTION")),
+            "the long help must open with the sentence -h prints, got: {CLI_LONG_ABOUT}"
+        );
+
+        for verb in ["scan", "embed", "extract", "generate"] {
+            assert!(
+                CLI_LONG_ABOUT.contains(&format!("stenoxide {verb}")),
+                "the flow must still name {verb}, got: {CLI_LONG_ABOUT}"
+            );
+        }
+
+        // The two installation utilities stay out: they are not steps of the
+        // flow, and the list of commands clap prints below already has them.
+        assert!(
+            !CLI_LONG_ABOUT.contains("completions") && !CLI_LONG_ABOUT.contains("stenoxide man"),
+            "the quickstart is about the four verbs only, got: {CLI_LONG_ABOUT}"
         );
     }
 

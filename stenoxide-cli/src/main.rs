@@ -236,8 +236,9 @@ enum Command {
     Scan(ScanArgs),
     /// Hide a message, read from standard input, inside a PNG container.
     Embed {
-        /// Container image. Must be a PNG of at least 2000x2000 pixels that has
-        /// never been JPEG-compressed.
+        /// Container image: the photo the message is hidden inside. Must be a
+        /// PNG of at least 2000x2000 pixels that has never been
+        /// JPEG-compressed.
         #[arg(long, value_name = "PATH")]
         input: PathBuf,
         /// Where to write the resulting stego image. Always written as PNG.
@@ -278,9 +279,10 @@ enum Command {
         /// The stego image to read.
         #[arg(long, value_name = "PATH")]
         input: PathBuf,
-        /// Where to write the recovered payload. Written to standard output
-        /// when absent. A directory receives a file named after the type of
-        /// the content; a path without an extension is given one.
+        /// Where to write the recovered payload, the hidden file or message.
+        /// Written to standard output when absent. A directory receives a file
+        /// named after the type of the content; a path without an extension is
+        /// given one.
         #[arg(long, value_name = "PATH")]
         payload_out: Option<PathBuf>,
         /// Overwrite the output file if it already exists.

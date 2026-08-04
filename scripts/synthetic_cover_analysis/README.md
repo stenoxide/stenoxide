@@ -199,6 +199,96 @@ exist; this generates one, which is a different entry point — a payload-length
 header and an extraction path that does not run the trellis at all, since there
 are no costs to minimise when every position is equally free.
 
+---
+
+# Part III: the three open questions, answered
+
+Part II left three things unresolved, each of which could have sunk the idea.
+None of them did.
+
+## Does the container have to look like that?
+
+The generative construction is indifferent to appearance — its security is the
+grain's amplitude, not the picture — so the mosaic of coloured cells was assumed
+to be a presentation problem. It is not: it is the perceptual-hash gate, and the
+gate is far more specific than "needs texture".
+
+`compute_hash_bits` takes DCT coefficients `1..=64` of the thumbnail in
+**row-major** order. On a 32x32 grid that is the whole first row — the pure
+horizontal frequencies, up to the highest one the thumbnail can express — then
+all of the second. It demands energy at the thumbnail's own scale, and one
+thumbnail pixel of a 2000px container is 62.5 image pixels.
+
+`phash_scale_sweep` sweeps a random field through that range, six seeds each:
+
+| cell size | vs thumbnail pixel | accepted |
+|---|---|---|
+| 12 px | 0.19x | 1/6 |
+| 25 px | 0.40x | 2/6 |
+| 40 px | 0.64x | 4/6 |
+| **62.5 px** | **1.00x** | **6/6** |
+| 90 px | 1.44x | 4/6 |
+| 200 px | 3.20x | 3/6 |
+| 500 px | 8.00x | 0/6 |
+
+That is the design rule, and it explains Part I's survey exactly: fractal noise,
+marble and foliage are refused not for looking wrong but for putting their
+energy in the wrong octave. `1/f` content starves the high horizontal
+coefficients; a field at the thumbnail scale feeds them.
+
+Textures built to that rule and chosen to look like something are accepted at
+2/6 to 4/6 per seed, which the generator's existing 64-candidate search turns
+into a certainty. `pebbles` — Worley cells at 62px, tinted like stone — is the
+best of them and reads as terrazzo or polished concrete.
+
+The instructive failure is `lichen`, which tried to hide the required field
+under fractal noise and came out looking like the mosaic it was trying to
+escape. **The scale the gate demands is going to be visible, so the texture has
+to make it the motif rather than fight it** — stone, gravel, tiling, weave,
+scales, all of which are things that vary at exactly that scale in nature.
+
+## Does luminance-dependent grain leave dark regions leaking?
+
+No, and the reasoning was wrong to begin with. `minimum_sigma.py` computes what
+the construction actually needs: the LSB bias must stay far under the sampling
+noise of a container, `1/sqrt(1.2e7)` = `2.9e-4`. With the bias decaying as
+`exp(-2 pi^2 sigma^2)`, the minimum safe sigma with a thousandfold margin is
+**0.89**. The generator uses 2.0.
+
+Under the standard sensor model `sigma(L) = sqrt(read^2 + gain * L)`, shot noise
+contributes almost nothing at 8-bit levels, so sigma is set by the read term and
+is essentially constant across the frame. A sensor model clears the bar
+everywhere or nowhere; it does not create dark corners that leak. Even at
+`read = 0.5`, an unusually clean sensor, 97% of the range stays usable.
+
+## Can one `extract` serve both kinds without leaking which?
+
+Yes, and cheaply. `extract_disambiguation` measures it:
+
+| | |
+|---|---|
+| generative reader on a generated container | authenticates, 297 ms |
+| **trellis reader on a generated container** | **refuses, 538 ms** |
+| one Argon2id at production cost | 406 ms |
+| second attempt on top of it | +284 ms |
+
+Both paths derive from the same perceptual hash, so one derivation serves both
+attempts and the second costs a stream cipher over a megabyte. Every failure can
+report the one sentence the project already uses for a wrong password, a wrong
+image and a damaged payload.
+
+## And the length question answered itself
+
+The harness first tried to read the payload assuming its length was 1 MB plus a
+tag, and failed — because Zstandard returns slightly *more* than it was given on
+incompressible input. The length is not a function of anything a receiver knows.
+
+That settles the design: carry it inside the authenticated plaintext and fill
+the container to the last sample. Verified at `1_450_000` bytes in a 2000x2000
+container, 96.7% of the theoretical maximum, round trip intact. Filling always
+has the side benefit of hiding the message size completely, since every
+container is then the same size whatever it holds.
+
 ## Shape this would take, if it is ever built
 
 Nothing here is implemented in the product, and this section is a record of a

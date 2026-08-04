@@ -53,6 +53,21 @@ required-features = ["test-utils"]
 name = "generative_stego"
 required-features = ["test-utils"]
 
+# The texture-family survey, which judges candidates with the production gates.
+[[example]]
+name = "container_families"
+required-features = ["test-utils"]
+
+# The scale sweep that turns the hash gate into a design rule.
+[[example]]
+name = "phash_scale_sweep"
+required-features = ["test-utils"]
+
+# Whether one extract can serve both container kinds without leaking which.
+[[example]]
+name = "extract_disambiguation"
+required-features = ["test-utils"]
+
 [features]
 default = []
 # Post-quantum key encapsulation support.

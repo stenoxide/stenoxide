@@ -780,6 +780,48 @@ fn the_subkeys_are_independent_and_the_expansion_is_deterministic() {
     assert_ne!(&first.stc_seed()[..24], first.nonce().as_slice());
 }
 
+/// TEST 17 — a payload that is not text at all survives the round trip.
+///
+/// Every other round trip here carries a string, and a string is the one kind
+/// of payload that would still look right if some layer were quietly treating
+/// the plaintext as text: a lossy conversion through UTF-8 leaves ASCII alone.
+/// The bytes below are a real PNG — a signature, a header chunk and a CRC — so
+/// they carry the two things a text path mangles, a zero byte and a run of
+/// sequences that decode to nothing.
+///
+/// This is what the file forms of the front-end rest on. `--payload` hands the
+/// pipeline whatever is on disk, and that promise is only worth something if
+/// the bytes come back identical.
+#[test]
+fn a_payload_that_is_not_valid_utf8_round_trips_unchanged() {
+    let stego = NamedTempFile::new().expect("temporary stego file");
+
+    let mut payload = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x0D, b'I', b'H', b'D', b'R']);
+    payload.extend_from_slice(&[0xFF, 0xFE, 0xFD, 0x80, 0x00, 0xC3, 0x28, 0xED]);
+    payload.extend_from_slice(&(0..=255u8).collect::<Vec<u8>>());
+
+    assert!(
+        std::str::from_utf8(&payload).is_err(),
+        "the fixture must not be valid UTF-8, or it measures nothing"
+    );
+
+    test_pipeline()
+        .embed(
+            &support::textured_cover(),
+            Zeroizing::new(payload.clone()),
+            secret(PASSWORD),
+            stego.path(),
+        )
+        .expect("a binary payload must embed");
+
+    let (recovered, _report) = test_pipeline()
+        .extract(stego.path(), secret(PASSWORD))
+        .expect("extraction must succeed");
+
+    assert_eq!(recovered.as_slice(), payload.as_slice());
+}
+
 /// The subkeys the pipeline would derive for [`PASSWORD`] and a container.
 ///
 /// The salt is the container's perceptual hash, exactly as in production: there

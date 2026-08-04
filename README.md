@@ -87,7 +87,8 @@ cargo add stenoxide-core
 Neither the password nor the message is ever passed as an argument, so nothing
 sensitive reaches the shell history or the process table. Both validate the
 container before asking for anything, so an unusable image is refused before you
-type a passphrase.
+type a passphrase — and so is a payload path that cannot be read, or an output
+file that already exists.
 
 ### Scan
 
@@ -153,16 +154,49 @@ typed here does. End of file — `Ctrl+D`, or `Ctrl+Z` then `Enter` on Windows �
 also ends the message, but the dot is what the prompt offers because
 PowerShell's line editor keeps `Ctrl+Z` for itself and never delivers it.
 
+The payload does not have to be text. It never did — what is hidden is bytes,
+and the pipeline has always compressed and encrypted whatever it was handed —
+so `--payload` names a file of any kind and reads it instead of standard input:
+
+```sh
+stenoxide embed --input photo.png --output stego.png --payload secret.zip
+```
+
+Capacity is what stops this from being as useful as it sounds. A 3000x3000
+container carries about 22 KB once encrypted, so a text file, a key, a small
+document or a short archive fit comfortably; a photograph, an installer or
+anything already compressed does not. Text shrinks a great deal before it is
+measured and binary data usually does not, which is why the refusal quotes the
+size of the *compressed* payload rather than the size of your file. Ask
+`stenoxide scan` what a container can carry before choosing one.
+
+When `--payload` is given, standard input is not read at all, and a path that
+does not exist, names a folder, or is empty is refused before the passphrase is
+asked for.
+
 ### Extract
 
 ```sh
 stenoxide extract --input stego.png
+stenoxide extract --input stego.png --payload-out secret.zip
 ```
 
-Extraction writes the recovered message to standard output as raw bytes, and
-reports every failure — wrong password, image carrying nothing, damaged payload
-— with the same sentence. Telling them apart is the oracle an attacker holding
-an intercepted image is looking for.
+Without `--payload-out`, extraction writes the recovered message to standard
+output as raw bytes. With it, the payload goes to the file instead, nothing is
+printed, and the exit code is the only thing to check.
+
+The path is yours to choose in full: nothing about the original file name is
+hidden with the payload, so the sender has no say in what lands on your disk.
+Only the extension is recovered, from the leading bytes of the content against
+a fixed table — so `--payload-out recovered` writes `recovered.zip` for an
+archive and `recovered.txt` for text, and a directory receives a file named
+`payload.<ext>` inside it. An extension you write yourself is always used
+exactly as written.
+
+An existing file is never overwritten; `--force` is what authorises it. Every
+other failure — wrong password, image carrying nothing, damaged payload, a disk
+that filled up mid-write — is reported with the same sentence. Telling them
+apart is the oracle an attacker holding an intercepted image is looking for.
 
 ## Requirements
 

@@ -255,6 +255,23 @@ most often defeated by accident.
   photograph of your garden sent to a family member is unremarkable. The same
   photograph sent to a stranger, or to a contact you never send pictures to, is
   the thing that draws attention.
+- **A payload extracted to a file is plaintext on the recipient's disk, and it
+  is theirs to look after.** `--payload-out` writes the recovered bytes in
+  clear. The file is created `0600` on Unix, so only its owner can read it; on
+  Windows there is no equivalent and it inherits the permissions of the
+  directory it is written into, which in a shared or cloud-synchronised folder
+  can mean far more than its owner. From that moment it is an ordinary file:
+  the search index reads it, the automatic backup copies it, the wastebasket
+  keeps it after it is deleted, and the filesystem may hold fragments of it
+  after that. Extract into a directory you control — ideally on an encrypted
+  volume — and delete it deliberately when you are done with it.
+- **The name of that file is chosen by whoever extracts, not by whoever sent
+  it**, and that is deliberate. Nothing but the bytes is hidden: no file name,
+  no extension, no metadata of any kind. The name people give their own files
+  is descriptive because they chose it for themselves, and restoring it
+  automatically would materialise it on the recipient's disk, in their journal,
+  their index and their backup. Choosing a name that says nothing is a
+  protection you have because the tool does not take it away.
 
 ## What this system cannot protect against
 

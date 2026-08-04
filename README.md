@@ -79,6 +79,14 @@ silicon) are attached to every [GitHub
 release](https://github.com/stenoxide/stenoxide/releases) if you would rather
 not compile.
 
+Tab completion and the manual page are written on demand, as the artifact and
+nothing else, so both can be sourced or redirected directly:
+
+```sh
+source <(stenoxide completions bash)   # also zsh, fish, powershell, elvish
+stenoxide man > stenoxide.1
+```
+
 ### Library
 
 ```sh

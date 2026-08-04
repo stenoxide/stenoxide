@@ -103,7 +103,8 @@ use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap_complete::aot::{generate, Shell};
 use zeroize::Zeroizing;
 
 use stenoxide_core::cost::hill::HillCostProvider;
@@ -244,6 +245,32 @@ enum Command {
         #[arg(long, requires = "payload_out")]
         force: bool,
     },
+    /// Write a shell completion script to standard output.
+    ///
+    /// The script and nothing else, so that it can be sourced directly —
+    /// `source <(stenoxide completions bash)` — or saved wherever the shell
+    /// looks for its completions.
+    Completions {
+        /// Shell the script is written for.
+        #[arg(value_name = "SHELL", value_enum)]
+        shell: Shell,
+    },
+    /// Write the manual page to standard output.
+    ///
+    /// The roff source of `stenoxide.1`, for a packager to redirect into a
+    /// file: `stenoxide man > stenoxide.1`. It is produced at run time rather
+    /// than by a build script because a build script compiles as a separate
+    /// crate and cannot see the command definition it would have to describe.
+    ///
+    /// # Why there is one page and not one per subcommand
+    ///
+    /// The page rendered is the root command, whose SUBCOMMANDS section lists
+    /// every verb with its summary. Separate `stenoxide-embed.1` style pages
+    /// are deliberately not produced, and this subcommand takes no argument
+    /// asking for one: a single page is what `man stenoxide` finds, and it is
+    /// the whole of what this tool needs to document. The absence is a
+    /// decision, not an oversight.
+    Man,
 }
 
 /// Everything `stenoxide scan` accepts.
@@ -285,6 +312,8 @@ fn main() -> ExitCode {
             payload_out,
             force,
         } => run_extract(input, payload_out.as_deref(), *force),
+        Command::Completions { shell } => run_completions(*shell),
+        Command::Man => run_man(),
     };
 
     match outcome {
@@ -939,6 +968,81 @@ fn write_recovered_to_stdout(plaintext: &[u8]) -> Result<(), String> {
     }
 }
 
+/// Writes the completion script for `shell` to standard output.
+///
+/// # Errors
+///
+/// Returns the message to print when standard output cannot be written.
+fn run_completions(shell: Shell) -> Result<(), String> {
+    write_artifact(&completion_script(shell), "completion script")
+}
+
+/// The completion script for `shell`, as the bytes that make it up.
+///
+/// Rendered into memory rather than straight onto standard output for two
+/// reasons. The generator writes through an interface that cannot report a
+/// failure, so a closed pipe would end the process on its terms rather than on
+/// this program's; and a buffer is something a test can read back, which a
+/// console is not.
+fn completion_script(shell: Shell) -> Vec<u8> {
+    let mut command = Cli::command();
+    let name = command.get_name().to_string();
+    let mut script = Vec::new();
+
+    generate(shell, &mut command, name, &mut script);
+
+    script
+}
+
+/// Writes the manual page to standard output.
+///
+/// # Errors
+///
+/// Returns the message to print when the page cannot be rendered or standard
+/// output cannot be written.
+fn run_man() -> Result<(), String> {
+    write_artifact(&manual_page()?, "manual page")
+}
+
+/// The roff source of `stenoxide.1`, as the bytes that make it up.
+///
+/// One page, for the root command; see the `man` subcommand for why there is no
+/// page per subcommand.
+///
+/// # Errors
+///
+/// Returns the message to print when the renderer fails, which for a buffer in
+/// memory it cannot — the case is carried rather than discarded so that no
+/// failure of the layer below is swallowed here.
+fn manual_page() -> Result<Vec<u8>, String> {
+    let mut page = Vec::new();
+
+    clap_mangen::Man::new(Cli::command())
+        .render(&mut page)
+        .map_err(|err| format!("Error: could not render the manual page: {err}"))?;
+
+    Ok(page)
+}
+
+/// Writes a generated artifact to standard output, and nothing besides it.
+///
+/// No banner, no progress line, no blank line of courtesy. What is written here
+/// is read by a shell being asked to source it or by a packager's redirection
+/// into a `.1` file, and a single byte of this program's own would break the
+/// first and corrupt the second. Only the failure speaks, and it speaks on
+/// stderr like everything else addressed to a person.
+///
+/// # Errors
+///
+/// Returns the message to print when standard output cannot be written, naming
+/// `what` was being written.
+fn write_artifact(bytes: &[u8], what: &str) -> Result<(), String> {
+    io::stdout()
+        .write_all(bytes)
+        .and_then(|()| io::stdout().flush())
+        .map_err(|err| format!("Error: could not write the {what}: {err}"))
+}
+
 /// Payload bytes `image` can carry, after encryption.
 ///
 /// `None` when a layer above the loader refuses the container, which is a
@@ -1008,6 +1112,8 @@ fn console_output_code_page() -> u32 {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
+
+    use clap::ValueEnum;
 
     use super::*;
 
@@ -1254,6 +1360,98 @@ mod tests {
         assert_eq!(
             stdout_delivery(true, "café — ñandú".as_bytes()),
             StdoutDelivery::Raw
+        );
+    }
+
+    /// Every shell the generator supports produces a script.
+    ///
+    /// The list is walked rather than spelled out, so that a shell added by a
+    /// future release of the generator is covered the day it appears.
+    #[test]
+    fn every_supported_shell_gets_a_script() {
+        for shell in Shell::value_variants() {
+            let script = completion_script(*shell);
+
+            assert!(!script.is_empty(), "{shell} produced no completion script");
+        }
+    }
+
+    /// The manual page carries the title macro every man page opens with.
+    ///
+    /// A cheap guard against the failure that would matter: anything printed to
+    /// standard output that is not the page itself ends up inside the `.1` file
+    /// a packager redirects, and a message would be as invisible there as it is
+    /// obvious here. The macro is looked for rather than required at the very
+    /// start of the file because the renderer emits the two-line apostrophe
+    /// definition every roff page carries ahead of it.
+    #[test]
+    fn the_manual_page_is_roff() {
+        let page = manual_page().expect("a page rendered into memory cannot fail");
+        let page = String::from_utf8(page).expect("the page is UTF-8");
+
+        assert!(page.contains(".TH stenoxide 1"), "no title macro in: {page}");
+        assert!(page.contains(".SH NAME"), "no name section in: {page}");
+    }
+
+    /// Nothing precedes the artifact on standard output.
+    ///
+    /// The direct check of the rule these two subcommands exist under: the very
+    /// first line is already the script or the page. A banner, or a blank line
+    /// of courtesy, would break `source <(stenoxide completions bash)` and
+    /// corrupt a redirected manual page — and would pass every other test here.
+    #[test]
+    fn the_first_line_is_already_the_artifact() {
+        let script = completion_script(Shell::Bash);
+        let script = String::from_utf8(script).expect("the script is UTF-8");
+        let first = script.lines().next().unwrap_or_default();
+
+        assert!(
+            first.starts_with('#') || first.starts_with('_'),
+            "a bash script opens with a comment or a function, got: {first:?}"
+        );
+
+        let page = manual_page().expect("a page rendered into memory cannot fail");
+        let page = String::from_utf8(page).expect("the page is UTF-8");
+        let first = page.lines().next().unwrap_or_default();
+
+        assert!(
+            first.starts_with('.'),
+            "a roff page opens with a control line, got: {first:?}"
+        );
+    }
+
+    /// The command definition still parses every argument it used to.
+    ///
+    /// Two subcommands were added beside the four that do the work; this pins
+    /// that they were added and nothing was disturbed — the flags of `embed`
+    /// and `extract` keep their names, and the definition itself stays
+    /// internally consistent, which is what `debug_assert` on a `clap` command
+    /// checks.
+    #[test]
+    fn the_existing_arguments_are_untouched() {
+        Cli::command().debug_assert();
+
+        let cli = Cli::try_parse_from([
+            "stenoxide",
+            "embed",
+            "--input",
+            "cover.png",
+            "--output",
+            "stego.png",
+            "--payload",
+            "secret.zip",
+        ])
+        .expect("the embed arguments must keep parsing");
+
+        assert!(
+            matches!(
+                cli.command,
+                Command::Embed { input, output, payload }
+                    if input == Path::new("cover.png")
+                        && output == Path::new("stego.png")
+                        && payload.as_deref() == Some(Path::new("secret.zip"))
+            ),
+            "embed must still parse into the same three paths"
         );
     }
 

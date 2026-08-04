@@ -5,8 +5,16 @@
 //! ```text
 //! stenoxide scan    ./photos --recursive
 //! stenoxide embed   --input cover.png --output stego.png   < message.txt
+//! stenoxide embed   --input cover.png --output stego.png --payload secret.zip
 //! stenoxide extract --input stego.png                      > message.txt
+//! stenoxide extract --input stego.png --payload-out secret.zip
 //! ```
+//!
+//! The payload has always been arbitrary bytes rather than text, so the file
+//! forms are not a new capability so much as the end of a shell redirection the
+//! user had to arrange themselves. They change nothing about what is embedded:
+//! an image produced with `--payload` is indistinguishable from one produced by
+//! piping the same bytes in.
 //!
 //! # Why nothing secret is an argument
 //!
@@ -19,6 +27,18 @@
 //! piped in or typed. Typing it is in fact the more private of the two: a
 //! message given to `echo` is a command line like any other and lands in the
 //! shell's history. See [`read_plaintext`] for how a typed message is ended.
+//!
+//! A path is not a secret, and `--payload` does not weaken any of that: what
+//! reaches the command line is where the file is, never a byte of what is in
+//! it.
+//!
+//! # Why the recovered file is named by whoever extracts it
+//!
+//! `--payload-out` takes a full path, and the sender has no say in it: the
+//! payload carries no file name, because nothing but the bytes is hidden. The
+//! extension is recovered from the content instead, against a closed table. The
+//! reasoning — which is about the recipient's disk and about paths built from
+//! untrusted input, not about cryptography — is in the [`payload`] module.
 //!
 //! # Why the container is validated before the password is asked for
 //!
@@ -61,9 +81,10 @@ use stenoxide_core::cost::CostProvider;
 use stenoxide_core::image_io::buffer::ImageBuffer;
 use stenoxide_core::image_io::phash::compute_stable_phash;
 use stenoxide_core::image_io::validate::{load_and_validate, ValidationError};
-use stenoxide_core::pipeline::{EmbedPipeline, EmbedReport};
-use stenoxide_core::stego::sizer::{compute_capacity, EmbeddingMode};
+use stenoxide_core::pipeline::{EmbedPipeline, EmbedReport, PipelineError};
+use stenoxide_core::stego::sizer::{compute_capacity, EmbeddingMode, SizerError};
 
+mod payload;
 mod progress;
 mod scan;
 
@@ -118,6 +139,10 @@ enum Command {
         /// Where to write the resulting stego image. Always written as PNG.
         #[arg(long, value_name = "PATH")]
         output: PathBuf,
+        /// File to hide. Read from standard input when absent; when given,
+        /// standard input is not read at all and any redirection is ignored.
+        #[arg(long, value_name = "PATH")]
+        payload: Option<PathBuf>,
     },
     /// Recover a hidden message from a stego image and write it to standard
     /// output.
@@ -125,6 +150,14 @@ enum Command {
         /// The stego image to read.
         #[arg(long, value_name = "PATH")]
         input: PathBuf,
+        /// Where to write the recovered payload. Written to standard output
+        /// when absent. A directory receives a file named after the type of
+        /// the content; a path without an extension is given one.
+        #[arg(long, value_name = "PATH")]
+        payload_out: Option<PathBuf>,
+        /// Overwrite the output file if it already exists.
+        #[arg(long, requires = "payload_out")]
+        force: bool,
     },
 }
 
@@ -151,8 +184,16 @@ fn main() -> ExitCode {
 
     let outcome = match &cli.command {
         Command::Scan(args) => scan::run(args),
-        Command::Embed { input, output } => run_embed(input, output),
-        Command::Extract { input } => run_extract(input),
+        Command::Embed {
+            input,
+            output,
+            payload,
+        } => run_embed(input, output, payload.as_deref()),
+        Command::Extract {
+            input,
+            payload_out,
+            force,
+        } => run_extract(input, payload_out.as_deref(), *force),
     };
 
     match outcome {
@@ -371,16 +412,33 @@ fn describe_rejection(path: &Path, error: &ValidationError) -> String {
 ///
 /// # Errors
 ///
-/// Returns the message to print when the container is unusable, the message
-/// does not fit, or the stego image cannot be written. The text comes from the
-/// layer that refused, which already phrases its failures for a user.
-fn run_embed(input: &Path, output: &Path) -> Result<(), String> {
+/// Returns the message to print when the container is unusable, the payload
+/// file cannot be read, the message does not fit, or the stego image cannot be
+/// written. Most of the text comes from the layer that refused, which already
+/// phrases its failures for a user; see [`describe_embed_failure`] for the one
+/// case that is rewritten.
+fn run_embed(input: &Path, output: &Path, payload: Option<&Path>) -> Result<(), String> {
     // Before anything is asked of the user: a container that will be refused is
     // refused now, rather than after a passphrase has been typed for nothing.
     drop(load_container(input)?);
 
+    // And for the same reason, a payload path that cannot be read is settled
+    // here too — a mistyped path is exactly as much a wasted passphrase as a
+    // JPEG is. The handle is kept rather than the verdict: reopening by path
+    // after the prompt would leave a window in which the file that was checked
+    // and the file that is read need not be the same one.
+    let source = match payload {
+        Some(path) => Some((payload::open_payload_file(path)?, path)),
+        None => None,
+    };
+
     let password = read_password()?;
-    let plaintext = read_plaintext()?;
+
+    // With `--payload` standard input is not touched at all, redirected or not.
+    let plaintext = match source {
+        Some((handle, path)) => payload::read_payload_file(handle, path)?,
+        None => read_plaintext()?,
+    };
 
     if plaintext.is_empty() {
         return Err("Error: the message is empty; nothing to hide.".to_string());
@@ -393,16 +451,50 @@ fn run_embed(input: &Path, output: &Path) -> Result<(), String> {
     // printed below states both.
     let activity = progress::Activity::start();
 
-    let outcome = EmbedPipeline::default_secure()
-        .embed(input, plaintext, password, output)
-        .map_err(|err| format!("Error: {err}"));
+    let outcome = EmbedPipeline::default_secure().embed(input, plaintext, password, output);
 
     activity.finish();
 
-    let report = outcome?;
+    let report = outcome.map_err(|err| describe_embed_failure(&err))?;
 
     print_report(&report, output);
     Ok(())
+}
+
+/// Turns an embedding failure into the sentence the user reads.
+///
+/// Only one case is rewritten, on the same principle as [`describe_rejection`]:
+/// the sizer knows the three numbers that make the refusal actionable but is
+/// forbidden from printing them, because the same type answers a question about
+/// a container the user may not own. At this end of the program the container
+/// is theirs and the numbers are the whole answer.
+///
+/// The figure quoted is the payload *after* compression and encryption, and the
+/// message says so. Reporting the file's size instead would tell a user that
+/// their 30 KB of notes do not fit in a container that admits 22 KB, which is
+/// false: Zstandard runs first, and text collapses.
+fn describe_embed_failure(error: &PipelineError) -> String {
+    let PipelineError::Sizer(SizerError::PayloadTooLarge {
+        payload,
+        available,
+        deficit,
+    }) = error
+    else {
+        return format!("Error: {error}");
+    };
+
+    format!(
+        "Error: the payload does not fit in this container.\n       \
+         Compressed and encrypted it is {payload} bytes; the container admits \
+         {available}.\n       \
+         It is {deficit} bytes over.\n       \
+         That first figure is the payload after compression, not the size of \
+         the file:\n       \
+         text shrinks a great deal, so a much larger file may still fit and a \
+         smaller one may not.\n       \
+         Use a container of higher resolution; stenoxide scan reports what each \
+         one can carry."
+    )
 }
 
 /// Prints what the embedding did, on stdout.
@@ -429,8 +521,14 @@ fn print_report(report: &EmbedReport, output: &Path) {
 /// file that is not a PNG at all, or that no decoder can read, is not a stego
 /// image anybody could have produced, and saying so reveals nothing an attacker
 /// could not determine by opening the file themselves.
-fn run_extract(input: &Path) -> Result<(), String> {
+fn run_extract(input: &Path, payload_out: Option<&Path>, force: bool) -> Result<(), String> {
     drop(load_container(input)?);
+
+    if let Some(path) = payload_out {
+        if !force {
+            refuse_existing_destination(path)?;
+        }
+    }
 
     let password = read_password()?;
 
@@ -451,15 +549,75 @@ fn run_extract(input: &Path) -> Result<(), String> {
 
     let (plaintext, _report) = outcome?;
 
-    // Written as raw bytes rather than printed as text: the payload is whatever
-    // the sender put in, and forcing it through a string conversion would
-    // corrupt any message that is not valid UTF-8.
-    io::stdout()
-        .write_all(plaintext.as_slice())
-        .and_then(|()| io::stdout().flush())
-        // A broken pipe or a full disk is not a failed extraction, but naming
-        // the difference here would reintroduce the oracle: the same sentence
-        // covers both.
+    // The buffer is still the `Zeroizing` the pipeline handed over, and it stays
+    // one until the write is done: both destinations take a borrow of it, so no
+    // copy of the plaintext is made that would outlive this function.
+    match payload_out {
+        Some(path) => write_recovered_file(path, plaintext.as_slice(), force),
+        // Written as raw bytes rather than printed as text: the payload is
+        // whatever the sender put in, and forcing it through a string
+        // conversion would corrupt any message that is not valid UTF-8.
+        None => io::stdout()
+            .write_all(plaintext.as_slice())
+            .and_then(|()| io::stdout().flush())
+            // A broken pipe or a full disk is not a failed extraction, but
+            // naming the difference here would reintroduce the oracle: the same
+            // sentence covers both.
+            .map_err(|_| EXTRACTION_FAILED.to_string()),
+    }
+}
+
+/// Refuses a destination that already exists, before the password is asked for.
+///
+/// This check and the `create_new` inside [`payload::write_payload_file`] ask
+/// the same question and are reported in opposite ways, which looks like an
+/// inconsistency and is the opposite of one.
+///
+/// This one runs *before* anything has been attempted. At this point the
+/// program does not yet know whether the password is right — it has not been
+/// typed — so naming the file reveals nothing about the extraction. It is
+/// ordinary, useful advice: the user mistyped a path or forgot `--force`, and
+/// they are told so while it still costs them nothing.
+///
+/// The one inside the writer runs *after* a successful extraction, and by then
+/// any message specific to it would be an admission that the password was
+/// correct. So the file that appears in the gap between the two checks — a rare
+/// race, but the rule takes no exceptions for rarity — is reported as
+/// [`EXTRACTION_FAILED`], with everything else.
+///
+/// # Errors
+///
+/// Returns the message to print when `path` exists and is not a directory.
+fn refuse_existing_destination(path: &Path) -> Result<(), String> {
+    // A directory is not a collision: the payload is written *inside* it, under
+    // a name that depends on content nobody has extracted yet.
+    if path.is_dir() || !path.exists() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Error: {} already exists and would be overwritten.\n       \
+         Choose another path, or pass --force to replace it.",
+        path.display()
+    ))
+}
+
+/// Writes the recovered payload to disk, and says nothing at all.
+///
+/// Success is silence and exit code zero: the user asked for a file, they got a
+/// file, and a report printed alongside it would be one more thing to redirect.
+///
+/// # Errors
+///
+/// Returns [`EXTRACTION_FAILED`], whatever went wrong. A full disk, a directory
+/// that stopped being writable and a destination that appeared a moment ago all
+/// print the sentence a wrong password prints, because by this line the
+/// extraction has already succeeded and any message specific to the write would
+/// say so.
+fn write_recovered_file(requested: &Path, plaintext: &[u8], force: bool) -> Result<(), String> {
+    let destination = payload::resolve_output_path(requested, plaintext);
+
+    payload::write_payload_file(&destination, plaintext, force)
         .map_err(|_| EXTRACTION_FAILED.to_string())
 }
 
@@ -615,6 +773,63 @@ mod tests {
         let message = collect_typed_lines(&mut input).expect("a cursor cannot fail to read");
 
         assert_eq!(message.as_slice(), b"caf\xe9");
+    }
+
+    /// A payload that does not fit is told the three numbers, and what they mean.
+    ///
+    /// The sizer refuses without naming any of them, deliberately, because the
+    /// same type answers questions about containers the caller may not own. At
+    /// this end of the program the container is the user's and the numbers are
+    /// the entire answer — but only if the message also says that the figure is
+    /// the *compressed* payload, because otherwise it reads as a claim about
+    /// their file that is simply false.
+    #[test]
+    fn a_payload_that_does_not_fit_is_told_by_how_much() {
+        let message = describe_embed_failure(&PipelineError::Sizer(SizerError::PayloadTooLarge {
+            payload: 30_000,
+            available: 22_016,
+            deficit: 7_984,
+        }));
+
+        assert!(message.contains("30000"), "got: {message}");
+        assert!(message.contains("22016"), "got: {message}");
+        assert!(message.contains("7984"), "got: {message}");
+        assert!(
+            message.contains("after compression"),
+            "the message must not read as a claim about the file's size: {message}"
+        );
+        assert!(message.contains("stenoxide scan"), "got: {message}");
+    }
+
+    /// Every other pipeline failure keeps the sentence its own layer wrote.
+    #[test]
+    fn other_failures_are_printed_as_the_layer_phrased_them() {
+        let error = PipelineError::Validation(ValidationError::NotPng);
+        let message = describe_embed_failure(&error);
+
+        assert_eq!(message, format!("Error: {error}"));
+    }
+
+    /// A destination that is not there yet, and a directory, are both fine.
+    ///
+    /// The directory case is the one worth pinning: the payload is written
+    /// *inside* it under a name that depends on content nobody has extracted
+    /// yet, so treating it as a collision would refuse a command that is
+    /// perfectly well formed.
+    #[test]
+    fn only_an_existing_file_blocks_the_destination() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+
+        assert!(refuse_existing_destination(directory.path()).is_ok());
+        assert!(refuse_existing_destination(&directory.path().join("new.zip")).is_ok());
+
+        let taken = directory.path().join("taken.zip");
+        std::fs::write(&taken, b"already here").expect("fixture write");
+
+        let message =
+            refuse_existing_destination(&taken).expect_err("an existing file must be refused");
+        assert!(message.contains("taken.zip"), "got: {message}");
+        assert!(message.contains("--force"), "got: {message}");
     }
 
     /// The guidance names the terminator it expects.

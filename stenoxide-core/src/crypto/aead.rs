@@ -360,7 +360,10 @@ mod tests {
             .expect_err("a wrong key must not authenticate");
 
         assert!(
-            matches!(error, CryptoError::AEADError(AEADError::AuthenticationFailed)),
+            matches!(
+                error,
+                CryptoError::AEADError(AEADError::AuthenticationFailed)
+            ),
             "got: {error:?}"
         );
     }
@@ -407,7 +410,10 @@ mod tests {
         // The AEAD variant delegates rather than prefixing, so the sentence the
         // user sees is the one the primitive wrote.
         let wrapped = CryptoError::from(AEADError::AuthenticationFailed);
-        assert_eq!(wrapped.to_string(), AEADError::AuthenticationFailed.to_string());
+        assert_eq!(
+            wrapped.to_string(),
+            AEADError::AuthenticationFailed.to_string()
+        );
 
         assert!(std::error::Error::source(&wrapped).is_some());
         assert!(

@@ -579,7 +579,9 @@ fn solve_trellis(
 
         // The register starts every segment at zero, which is where the decoder
         // will start reading it.
-        current.iter_mut().for_each(|weight| *weight = f32::INFINITY);
+        current
+            .iter_mut()
+            .for_each(|weight| *weight = f32::INFINITY);
         if let Some(origin) = current.get_mut(0) {
             *origin = 0.0;
         }
@@ -745,7 +747,9 @@ fn survivor(survivors: &[u8], index: usize) -> bool {
 ///
 /// Wiped on drop: the expansion is a copy of the payload.
 fn unpack_bits(packed: &[u8]) -> Zeroizing<Vec<u8>> {
-    let mut bits = Zeroizing::new(Vec::with_capacity(packed.len().saturating_mul(BITS_PER_BYTE)));
+    let mut bits = Zeroizing::new(Vec::with_capacity(
+        packed.len().saturating_mul(BITS_PER_BYTE),
+    ));
 
     for byte in packed {
         for shift in (0..BITS_PER_BYTE).rev() {
@@ -1046,7 +1050,10 @@ mod tests {
             }
         }
 
-        assert!(up > 0 && down > 0, "{up} increments against {down} decrements");
+        assert!(
+            up > 0 && down > 0,
+            "{up} increments against {down} decrements"
+        );
     }
 
     /// TEST 3c — samples sitting at the ends of the range move inwards.
@@ -1111,7 +1118,10 @@ mod tests {
 
         let rendered = format!("{config:?}");
         assert!(rendered.contains("redacted"), "got: {rendered}");
-        assert!(!rendered.contains("90"), "the seed must not appear: {rendered}");
+        assert!(
+            !rendered.contains("90"),
+            "the seed must not appear: {rendered}"
+        );
     }
 
     /// TEST 4a — a cover and a cost map of different lengths are refused.

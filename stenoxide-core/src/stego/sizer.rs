@@ -250,7 +250,12 @@ mod tests {
 
     /// A container of [`SIDE`] squared pixels. Only its geometry matters here.
     fn image() -> ImageBuffer {
-        ImageBuffer::new(vec![0u8; (SIDE * SIDE) as usize], SIDE, SIDE, ColorSpace::Luma8)
+        ImageBuffer::new(
+            vec![0u8; (SIDE * SIDE) as usize],
+            SIDE,
+            SIDE,
+            ColorSpace::Luma8,
+        )
     }
 
     /// A map in which `usable` positions carry a positive cost and the rest are
@@ -356,7 +361,9 @@ mod tests {
         .to_string();
 
         assert!(message.contains("shorten the message"));
-        for leak in ["4242", "1337", "2905", "bpp", "0.02", "byte", "capacity", "pixel"] {
+        for leak in [
+            "4242", "1337", "2905", "bpp", "0.02", "byte", "capacity", "pixel",
+        ] {
             assert!(
                 !message.contains(leak),
                 "the message must not expose {leak:?}: {message}"

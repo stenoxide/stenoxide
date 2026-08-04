@@ -451,10 +451,12 @@ mod tests {
         let image = ImageBuffer::new(vec![0u8; 5], WIDTH, HEIGHT, ColorSpace::Rgb8);
         let file = NamedTempFile::new().expect("temporary stego file");
 
-        let error = write_png(&image, file.path())
-            .expect_err("a short buffer must not be encoded");
+        let error = write_png(&image, file.path()).expect_err("a short buffer must not be encoded");
 
-        assert!(matches!(error, OutputError::MalformedBuffer), "got: {error:?}");
+        assert!(
+            matches!(error, OutputError::MalformedBuffer),
+            "got: {error:?}"
+        );
     }
 
     /// A path that cannot be written is reported as an encoding failure.
@@ -463,8 +465,11 @@ mod tests {
         let image = container(ColorSpace::Rgb8);
         let directory = tempfile::tempdir().expect("temporary directory");
 
-        let error = write_png(&image, &directory.path().join("no-such-dir").join("out.png"))
-            .expect_err("a path under a missing directory must fail");
+        let error = write_png(
+            &image,
+            &directory.path().join("no-such-dir").join("out.png"),
+        )
+        .expect_err("a path under a missing directory must fail");
 
         assert!(
             matches!(error, OutputError::EncodingFailed(_)),

@@ -411,7 +411,9 @@ fn matches_component(name: &str, pattern: &str) -> bool {
     }
 
     // Trailing wildcards may still match the empty remainder.
-    pattern[consumed..].iter().all(|&character| character == '*')
+    pattern[consumed..]
+        .iter()
+        .all(|&character| character == '*')
 }
 
 /// Runs the checks on one file.
@@ -464,7 +466,9 @@ fn examine(path: PathBuf) -> Entry {
 }
 
 /// The short name of a validation failure, and the dimensions it carries.
-fn describe(error: &stenoxide_core::image_io::validate::ValidationError) -> (&'static str, Option<(u32, u32)>) {
+fn describe(
+    error: &stenoxide_core::image_io::validate::ValidationError,
+) -> (&'static str, Option<(u32, u32)>) {
     use stenoxide_core::image_io::validate::ValidationError as Error;
 
     match error {
@@ -537,7 +541,10 @@ fn render_listing(argument: &str, entries: &[Entry], all: bool) -> String {
         );
     }
 
-    let _ = writeln!(report, "  Summary: {usable} valid, {unusable} invalid ({scanned} scanned)");
+    let _ = writeln!(
+        report,
+        "  Summary: {usable} valid, {unusable} invalid ({scanned} scanned)"
+    );
 
     if unusable > 0 && !all {
         let _ = writeln!(report, "  Run with --all to see why an image was rejected.");
@@ -744,10 +751,22 @@ mod tests {
 
         let rendered = render_json(&entries);
 
-        assert!(rendered.contains("\"path\": \"good.png\""), "got: {rendered}");
-        assert!(rendered.contains("\"dimensions\": [2000, 2400]"), "got: {rendered}");
-        assert!(rendered.contains("\"capacity_kb\": 12.4"), "got: {rendered}");
-        assert!(rendered.contains("\"reason\": \"JpegDetected\""), "got: {rendered}");
+        assert!(
+            rendered.contains("\"path\": \"good.png\""),
+            "got: {rendered}"
+        );
+        assert!(
+            rendered.contains("\"dimensions\": [2000, 2400]"),
+            "got: {rendered}"
+        );
+        assert!(
+            rendered.contains("\"capacity_kb\": 12.4"),
+            "got: {rendered}"
+        );
+        assert!(
+            rendered.contains("\"reason\": \"JpegDetected\""),
+            "got: {rendered}"
+        );
         assert!(rendered.contains("\"scanned\": 2"), "got: {rendered}");
         assert!(rendered.contains("\"valid\": 1"), "got: {rendered}");
         assert!(rendered.contains("\"invalid\": 1"), "got: {rendered}");
@@ -779,7 +798,10 @@ mod tests {
         assert!(rendered.contains("photos/good.png"), "got: {rendered}");
         assert!(rendered.contains("3840x2160"), "got: {rendered}");
         assert!(rendered.contains("74.2 KB payload"), "got: {rendered}");
-        assert!(rendered.contains("ImageTooSmall 400x400"), "got: {rendered}");
+        assert!(
+            rendered.contains("ImageTooSmall 400x400"),
+            "got: {rendered}"
+        );
         assert!(
             rendered.contains("Summary: 1 valid, 1 invalid (2 scanned)"),
             "got: {rendered}"

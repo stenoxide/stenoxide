@@ -499,18 +499,18 @@ mod tests {
         let saved = match color_space {
             ColorSpace::Rgb8 => RgbImage::from_pixel(SIDE, SIDE, Rgb([90, 110, 130]))
                 .save_with_format(file.path(), ImageFormat::Png),
-            ColorSpace::Rgba8 => RgbaImage::from_pixel(SIDE, SIDE, image::Rgba([90, 110, 130, 255]))
-                .save_with_format(file.path(), ImageFormat::Png),
+            ColorSpace::Rgba8 => {
+                RgbaImage::from_pixel(SIDE, SIDE, image::Rgba([90, 110, 130, 255]))
+                    .save_with_format(file.path(), ImageFormat::Png)
+            }
             ColorSpace::Luma8 => GrayImage::from_pixel(SIDE, SIDE, image::Luma([110]))
                 .save_with_format(file.path(), ImageFormat::Png),
-            ColorSpace::Rgb16 => {
-                image::ImageBuffer::<Rgb<u16>, Vec<u16>>::from_pixel(
-                    SIDE,
-                    SIDE,
-                    Rgb([23_000, 28_000, 33_000]),
-                )
-                .save_with_format(file.path(), ImageFormat::Png)
-            }
+            ColorSpace::Rgb16 => image::ImageBuffer::<Rgb<u16>, Vec<u16>>::from_pixel(
+                SIDE,
+                SIDE,
+                Rgb([23_000, 28_000, 33_000]),
+            )
+            .save_with_format(file.path(), ImageFormat::Png),
         };
         saved.expect("a flat png must be writable");
 
@@ -567,7 +567,10 @@ mod tests {
             .map(|_| ())
             .expect_err("a path that does not exist must be refused");
 
-        assert!(matches!(error, ValidationError::IoError(_)), "got: {error:?}");
+        assert!(
+            matches!(error, ValidationError::IoError(_)),
+            "got: {error:?}"
+        );
 
         // The `source` chain is what lets a front-end print why the read
         // failed without this layer having to flatten it into a string.
@@ -594,8 +597,11 @@ mod tests {
     fn the_probe_refuses_what_the_loader_refuses() {
         let scratch = NamedTempFile::new().expect("temporary file");
 
-        std::fs::write(scratch.path(), [0xFF, 0xD8, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-            .expect("a jpeg header must be writable");
+        std::fs::write(
+            scratch.path(),
+            [0xFF, 0xD8, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        )
+        .expect("a jpeg header must be writable");
         assert!(matches!(
             probe_geometry(scratch.path()),
             Err(ValidationError::JpegDetected)

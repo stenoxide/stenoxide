@@ -648,7 +648,10 @@ mod tests {
 
         assert_eq!(map.pixel_count(), image.pixel_count());
         assert_eq!(map.costs().len(), image.pixel_count());
-        assert!(map.costs().iter().all(|cost| cost.is_finite() && *cost > 0.0));
+        assert!(map
+            .costs()
+            .iter()
+            .all(|cost| cost.is_finite() && *cost > 0.0));
     }
 
     /// A container that is high-energy everywhere has no textured region to
@@ -688,7 +691,9 @@ mod tests {
         let gray_image = ImageBuffer::new(luma, SIDE, SIDE, ColorSpace::Luma8);
 
         let provider = HillCostProvider::new();
-        let colour = provider.compute(&colour_image).expect("grain must be usable");
+        let colour = provider
+            .compute(&colour_image)
+            .expect("grain must be usable");
         let gray = provider.compute(&gray_image).expect("grain must be usable");
 
         for (index, (with, without)) in colour.costs().iter().zip(gray.costs()).enumerate() {
@@ -715,4 +720,3 @@ mod tests {
             .contains("detail"));
     }
 }
-

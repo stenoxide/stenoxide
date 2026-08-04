@@ -98,7 +98,116 @@ a wrong one differs in millions. A seed drawn from a timestamp would be perhaps
 thirty bits and would fall in seconds. Anything built on this would need at least
 128 bits from the system CSPRNG and must never persist the clean cover.
 
+---
+
+# Part II: generating the container *around* the payload
+
+The measurement above answers the question that was asked and raises a better
+one. If the sender knows the cover distribution exactly — and when the sender
+generates the container, they do — then embedding is the wrong operation
+entirely.
+
+## Why there is a construction with nothing left to detect
+
+Embedding modifies an image, and a modification is a thing a detector can hunt
+for; the argument is only ever about how well it is hidden. A generator can do
+something an embedder cannot: draw each sample from the cover distribution
+*conditioned on its least significant bit being the ciphertext bit it must
+carry*. Rejection sampling does that in about two draws. Then, for a uniform
+carrier bit,
+
+    sum over b of  P(sample = v | LSB = b) P(b)  =  P(sample = v)
+
+exactly, provided the LSB of the unconditioned distribution is a fair coin. The
+container that carries a message and the container that carries nothing are
+draws from **one distribution**. There is no statistic to find, no detector to
+out-run, and no future model that changes it — the two hypotheses are equal.
+
+The whole argument rests on the fairness of that coin, and `one_in_n.py`
+measures it. For grain `floor(c + N(0, sigma))` the LSB bias decays as
+`exp(-2 pi^2 sigma^2)`:
+
+| grain sigma | LSB bias | samples needed to notice | container holds |
+|---|---|---|---|
+| 0.5 | 1.9e-01 | 10^1 | |
+| 1.0 | 4.6e-03 | 10^5 | |
+| **2.0** | **<1e-9** (theory: 1e-34) | **10^18** | **10^7.1** |
+
+At sigma 2 the margin is eleven orders of magnitude, and that is against the
+float64 noise floor of the measurement rather than the real bias, which the
+theta expansion puts near `1e-34`. The generator's existing grain is already
+past the point where this matters.
+
+## What it costs and what it buys
+
+`generative_stego.rs` implements it end to end. The circularity — the key comes
+from a hash of the container, which now depends on the ciphertext, which depends
+on the key — unties because the perceptual hash reads a 32x32 thumbnail where
+four thousand grain samples average away, and layer 1 already refuses any
+container whose coefficients sit within `5.0` of the median. A draft container
+fixes the hash, the hash fixes the key, and the final container is *verified* to
+hash the same by decrypting it back.
+
+| | embedding into a synthetic cover | generating around the payload |
+|---|---|---|
+| capacity, 2000x2000 | ~7 KB | **1 MB** (1 bit per sample) |
+| samples changed | 6747 of 12,000,000 | none — nothing is changed |
+| optimal detector | AUC 0.586 | **AUC 0.500, provably** |
+| picking 1 of 100 | 2.09% | **exactly 1%** |
+
+The rate cap is what holds the left column up, and it does not apply to the
+right one: `0.02` bpp exists because a photograph's distribution is unknown to
+the sender. Here the sender *is* the distribution.
+
+## Verification
+
+Sixteen containers, eight generated around 1 MB of incompressible payload and
+eight around nothing, all validated through the production path:
+
+- **Round trip.** All eight recover their megabyte, authenticated under a key
+  derived from the hash of the image as it arrived on disk.
+- **`stenoxide scan` accepts all sixteen identically**, reporting the same
+  ~8.3 KB capacity for a container already holding 1 MB and for one holding
+  nothing.
+- **No statistic separates them.** `hcf_com`, `peak_kurt`, `hf_energy` and
+  `pair_ratio` all overlap, separating at 0.33 to 0.71 — which at n=8 per group
+  is what chance looks like.
+
+A null result proves nothing on its own, so `indistinguishability.py` carries a
+positive control. The naive construction — overwrite the LSB rather than sample
+conditioned on it — is applied at the same load factor and measured with the
+same statistic. It moves `pair_ratio` by **434 pooled standard deviations**,
+because overwriting redistributes mass within each value pair and flattens the
+cover histogram's natural imbalance. The test can convict, and it does not.
+
+## What this does not fix
+
+**It hides which, not whether.** The two hypotheses it equalises are "generated
+around a message" and "generated around nothing". It says nothing about
+"generated" versus "photographed" — the container still looks like a mosaic of
+coloured cells, and an adversary looking at the folder still sees a hundred
+images nobody has a reason to own. Against the folder-of-100 question this is a
+complete answer; against the question of why the folder exists it is no answer
+at all.
+
+**The seed stays key material.** No cover exists to subtract, but an adversary
+who can reproduce the generator's RNG state regenerates the container and
+compares. 128+ bits from the system CSPRNG, and the clean draft never persisted.
+
+**It is a prototype, not a mode.** `stenoxide` embeds into images that already
+exist; this generates one, which is a different entry point — a payload-length
+header and an extraction path that does not run the trellis at all, since there
+are no costs to minimise when every position is equally free.
+
 ## Running it
+
+```sh
+cargo run --release --example generative_stego --features test-utils -- gen 16 1000000
+python scripts/synthetic_cover_analysis/indistinguishability.py gen
+python scripts/synthetic_cover_analysis/one_in_n.py
+```
+
+## Running the Part I harness
 
 ```sh
 cargo run --release --example synthetic_cover_probe --features test-utils -- out 10

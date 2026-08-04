@@ -48,6 +48,11 @@ static_assertions.workspace = true
 name = "synthetic_cover_probe"
 required-features = ["test-utils"]
 
+# The generative-container prototype, for the same reason.
+[[example]]
+name = "generative_stego"
+required-features = ["test-utils"]
+
 [features]
 default = []
 # Post-quantum key encapsulation support.

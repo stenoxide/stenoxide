@@ -1,5 +1,56 @@
 # Changelog
 
+## [1.7.2] - 2026-08-04
+
+### Breaking Changes
+- **deps**: raise the minimum supported Rust version to 1.85 — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+
+### Features
+- CI/CD with automated versioning, multiplataform builds and crates.io publishing — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **ci**: rewrite a non-conforming pull request title instead of rejecting it — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- comprehensive test suite with 90% coverage requirement — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **cli**: scan subcommand, pre-auth container validation and actionable errors — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **cli**: progress reporting, and a size ceiling that stops the scan hanging — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **cli**: end a typed message with a dot, and say so (#4) — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **cli**: read the payload from a file and write it back to one (#9) — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **cli**: read the payload from a file and write it back to one — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- Add the release pipeline (#1) — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- CI/CD with automated versioning, multiplataform builds and crates.io publishing — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **ci**: rewrite a non-conforming pull request title instead of rejecting it — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+
+### Bug Fixes
+- **ci**: re-check the pull request title when it is edited — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **ci**: statistically valid steganalysis with proportional payload and crops — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **research**: stop the analysis assuming one particular texture — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **ci**: re-check the pull request title when it is edited — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+
+### Other Changes
+- re-render the 0.1.0 changelog entry in the current format — [@adrian-cancio](https://github.com/adrian-cancio) ([`0d5f368`](https://github.com/stenoxide/stenoxide/commit/0d5f3686699fccb9aadf785d96c46a7685967364))
+- credit the 0.1.0 entries by GitHub handle — [@adrian-cancio](https://github.com/adrian-cancio) ([`b90dfa5`](https://github.com/stenoxide/stenoxide/commit/b90dfa593b75445461a245e9f5631e27e92ed6e4))
+- iterative conventional-commit versioning and pull request conventions — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- operational security guide — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- explain why the container restrictions exist — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- install llvm-tools-preview for the coverage gate — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **cli**: say why embedding gets a spinner rather than a bar — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **release**: tag with the artefacts, and attribute every changelog line (#2) — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **release**: let a changelog section be re-rendered at its original date (#5) — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **rulesets**: gate merges into main on the checks it already runs (#7) — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- ruleset probe — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **rulesets**: gate merges into main on the checks it already runs — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **release**: credit changelog entries by GitHub handle (#8) — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **release**: let a changelog section be re-rendered at its original date — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **release**: credit the GitHub account, not the name in the commit — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- apply the current rustfmt to the files it had drifted from — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- keep prompt references out of the git history too (#10) — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **actions**: run the tests and the coverage floor only into stable (#11) — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- **research**: whether a generated container can be made undetectable (#6) — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- record the interface decision, and what is still unanswered — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- keep the write-up in step with what was measured — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- merge the stable release history back into main (#13) — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- iterative conventional-commit versioning and pull request conventions — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- re-render the 0.1.0 changelog entry in the current format — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+- credit the 0.1.0 entries by GitHub handle — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))
+
 ## [0.1.0] - 2026-08-03
 
 ### Features

@@ -1,15 +1,13 @@
 //! Command line front-end of `stenoxide`.
 //!
-//! Four subcommands, three of which read the password interactively:
+//! Three subcommands, two of which read the password interactively:
 //!
 //! ```text
-//! stenoxide scan     ./photos --recursive
-//! stenoxide embed    --input cover.png --output stego.png   < message.txt
-//! stenoxide embed    --input cover.png --output stego.png --payload secret.zip
-//! stenoxide extract  --input stego.png                      > message.txt
-//! stenoxide extract  --input stego.png --payload-out secret.zip
-//! stenoxide generate --output container.png --input message.txt
-//! stenoxide generate --output container.png --input big.bin --width 2500 --height 2500
+//! stenoxide scan    ./photos --recursive
+//! stenoxide embed   --input cover.png --output stego.png   < message.txt
+//! stenoxide embed   --input cover.png --output stego.png --payload secret.zip
+//! stenoxide extract --input stego.png                      > message.txt
+//! stenoxide extract --input stego.png --payload-out secret.zip
 //! ```
 //!
 //! The payload has always been arbitrary bytes rather than text, so the file
@@ -53,21 +51,6 @@
 //! given, and it is the pipeline's verdict, not this one, that decides whether
 //! anything is embedded.
 //!
-//! # Why `generate` is a subcommand and not an offer
-//!
-//! `embed` needs a container, and the tempting interface is to notice that it
-//! was given none and offer to make one. It is the wrong place for it twice
-//! over. A user who omitted `--input` made a typo and is not asking to change
-//! their security model, so the offer would turn a slip into a hurried
-//! decision; and the operation that fits behind such a prompt is *generate,
-//! then embed*, which is the weaker of the two constructions by a wide margin —
-//! roughly 7 KB of capacity against 1.4 MB, and a detectable container against
-//! one that provably is not. The convenient path would deliver the worse mode.
-//!
-//! Discoverability belongs in `scan` instead: when it walks a directory and
-//! accepts nothing at all, it says so in one line. That user has already
-//! demonstrated that they looked.
-//!
 //! # Why the two subcommands report failure so differently
 //!
 //! Embedding is a local operation whose failures are the user's to fix — a
@@ -80,19 +63,6 @@
 //! wants: it would confirm that the image is a container at all, and turn a
 //! password search into a test with a yes-or-no answer. So extraction prints
 //! one sentence and never says which of the three happened.
-//!
-//! # The one thing extraction says beyond that sentence
-//!
-//! A recovered payload with no `--payload-out` goes to standard output, and a
-//! payload that is binary cannot go to a *terminal*: a Windows console rejects
-//! bytes that are not valid UTF-8, and a Unix terminal would be sprayed with
-//! control codes. So a binary payload bound for a terminal is announced instead
-//! of written. That notice reveals the extraction succeeded — but so does a text
-//! payload printed to the same terminal, and so does any file written under
-//! `--payload-out`; success is inherent in producing the plaintext. The single
-//! sentence still covers the three failures and every post-success write error
-//! on the redirected path, which is all it ever protected. See
-//! [`write_recovered_to_stdout`].
 
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
@@ -108,10 +78,6 @@ use zeroize::Zeroizing;
 
 use stenoxide_core::cost::hill::HillCostProvider;
 use stenoxide_core::cost::CostProvider;
-use stenoxide_core::generate::{
-    generate_container, ContainerDimensions, GenerateError, GenerateReport, DEFAULT_CONTAINER_SIDE,
-    MIN_CONTAINER_SIDE,
-};
 use stenoxide_core::image_io::buffer::ImageBuffer;
 use stenoxide_core::image_io::phash::compute_stable_phash;
 use stenoxide_core::image_io::validate::{load_and_validate, ValidationError};
@@ -138,33 +104,6 @@ const PASSWORD_PROMPT: &str = "Password: ";
 /// given in [`read_plaintext`]: it is ordinary text, so no shell can intercept
 /// it on its way to this process.
 const END_OF_MESSAGE: &str = ".";
-
-/// The long help of `generate`, which has one thing it must say.
-///
-/// A user reaches this subcommand because nothing they own can be used as a
-/// container, and the mode answers a narrower question than they are likely to
-/// assume. It hides *which* of several generated containers carries a message,
-/// completely and provably. It does not hide that the file was generated: it
-/// looks like a synthetic texture, and a folder of them is conspicuous in a way
-/// no analysis of any single file needs to be.
-const GENERATE_LONG_ABOUT: &str = "\
-Build a container around a message instead of hiding it inside an existing image.
-
-For when there is no usable photograph — a camera that only writes JPEG, no way
-to move pictures across from a phone. The container is drawn sample by sample,
-each one conditioned on the ciphertext bit it carries, so a container holding a
-message and one holding nothing are draws from the same distribution and no
-detector can separate them. It carries about 1.4 MB, against the 8 KB an image
-of the same size admits by embedding.
-
-The default container is 2000x2000, the smallest and least conspicuous the mode
-draws. A payload that does not fit needs a larger one: raise --width and
---height together (each at least 2000). Capacity grows with the pixel count, so
-the error printed when a payload overflows names a size that would hold it.
-
-It does not hide that the container was generated. It looks like a synthetic
-texture, and a folder full of them is itself the thing worth explaining. Prefer
-a photograph of your own that has never been published, whenever you have one.";
 
 /// What the user is told before they are expected to type a message.
 ///
@@ -204,30 +143,6 @@ enum Command {
         /// standard input is not read at all and any redirection is ignored.
         #[arg(long, value_name = "PATH")]
         payload: Option<PathBuf>,
-    },
-    /// Build a container around a message, for when there is no usable photo.
-    #[command(long_about = GENERATE_LONG_ABOUT)]
-    Generate {
-        /// Where to write the container. Always written as PNG.
-        #[arg(long, value_name = "PATH")]
-        output: PathBuf,
-        /// File to hide. Read from standard input when absent; when given,
-        /// standard input is not read at all and any redirection is ignored.
-        #[arg(long, value_name = "PATH")]
-        input: Option<PathBuf>,
-        /// Width of the container to draw, in pixels. Defaults to 2000, the
-        /// smallest — and least conspicuous — the mode will produce; raise it,
-        /// together with --height, only when a payload does not fit. Must be at
-        /// least 2000.
-        #[arg(long, value_name = "PIXELS", default_value_t = DEFAULT_CONTAINER_SIDE,
-              value_parser = clap::value_parser!(u32).range(i64::from(MIN_CONTAINER_SIDE)..))]
-        width: u32,
-        /// Height of the container to draw, in pixels. Defaults to 2000. Must be
-        /// at least 2000; a larger container carries more, in proportion to its
-        /// pixel count.
-        #[arg(long, value_name = "PIXELS", default_value_t = DEFAULT_CONTAINER_SIDE,
-              value_parser = clap::value_parser!(u32).range(i64::from(MIN_CONTAINER_SIDE)..))]
-        height: u32,
     },
     /// Recover a hidden message from a stego image and write it to standard
     /// output.
@@ -274,12 +189,6 @@ fn main() -> ExitCode {
             output,
             payload,
         } => run_embed(input, output, payload.as_deref()),
-        Command::Generate {
-            output,
-            input,
-            width,
-            height,
-        } => run_generate(output, input.as_deref(), *width, *height),
         Command::Extract {
             input,
             payload_out,
@@ -588,160 +497,6 @@ fn describe_embed_failure(error: &PipelineError) -> String {
     )
 }
 
-/// Runs the generative path.
-///
-/// The shape of [`run_embed`] minus the container: the payload is settled
-/// before the passphrase is asked for, for the same reason, and there is no
-/// image to validate because there is no image yet.
-///
-/// The requested size is settled first of all — before even the payload — so
-/// that `--width 1999` is refused instantly rather than after a file has been
-/// read and a passphrase typed. `clap` has already held each side to the 2000
-/// floor; this is where the two are checked against the pixel ceiling together.
-///
-/// # Errors
-///
-/// Returns the message to print when the size is out of range, the payload file
-/// cannot be read, the payload does not fit, or the container cannot be
-/// generated or written.
-fn run_generate(
-    output: &Path,
-    input: Option<&Path>,
-    width: u32,
-    height: u32,
-) -> Result<(), String> {
-    let dimensions =
-        ContainerDimensions::new(width, height).map_err(|err| describe_generate_failure(&err))?;
-
-    // A payload path that cannot be read is settled before the prompt, exactly
-    // as in `run_embed`: a mistyped path is a wasted passphrase either way, and
-    // the handle is kept so that the file checked and the file read are one.
-    let source = match input {
-        Some(path) => Some((payload::open_payload_file(path)?, path)),
-        None => None,
-    };
-
-    let password = read_password()?;
-
-    let plaintext = match source {
-        Some((handle, path)) => payload::read_payload_file(handle, path)?,
-        None => read_plaintext()?,
-    };
-
-    if plaintext.is_empty() {
-        return Err("Error: the message is empty; nothing to hide.".to_string());
-    }
-
-    // Generation is the slowest thing this program does — two renders of twelve
-    // million samples, the container gates over four megapixels, and a PNG of
-    // incompressible content — and it says nothing while it works. The
-    // indicator reveals nothing either: the cost is a function of a fixed
-    // container size and of how many candidate textures the gates refuse.
-    let activity = progress::Activity::start();
-
-    let outcome = generate_container(plaintext, password, dimensions, output);
-
-    activity.finish();
-
-    let report = outcome.map_err(|err| describe_generate_failure(&err))?;
-
-    print_generate_report(&report, output);
-    Ok(())
-}
-
-/// Turns a failure of the generator into the sentence the user reads.
-///
-/// Two cases are rewritten, and the rest keep the sentence their own layer
-/// wrote. The capacity refusal is rewritten on the same principle as
-/// [`describe_embed_failure`]: the figure quoted is the payload *after*
-/// compression, and a message that did not say so would read as a false claim
-/// about the size of the user's file. It now also names a larger container that
-/// would fit and the two flags that ask for one — the whole point of the size
-/// being a parameter is undone if the error does not say it is.
-///
-/// The out-of-range refusal is rewritten only to prefix it with `Error:` and to
-/// name the two flags, so that a user who reached for them and overshot is
-/// pointed back at the range rather than left with a bare library sentence.
-fn describe_generate_failure(error: &GenerateError) -> String {
-    match error {
-        GenerateError::PayloadTooLarge {
-            payload,
-            available,
-            deficit,
-            recommended_side,
-        } => describe_payload_too_large(*payload, *available, *deficit, *recommended_side),
-        GenerateError::DimensionsOutOfRange { .. } => format!(
-            "Error: {error}.\n       \
-             Set the size with --width and --height; both must be at least 2000 \
-             pixels."
-        ),
-        other => format!("Error: {other}"),
-    }
-}
-
-/// The capacity refusal, with a container size to reach for.
-///
-/// The advice is the reason the size became a parameter: rather than "your
-/// payload is too large, full stop", it quotes a square that would hold this
-/// payload and the flags that ask for it. The suggestion is square because one
-/// figure describes a square; a user who wants a different shape now knows the
-/// area to aim for and can spend it on whatever width and height they like.
-fn describe_payload_too_large(
-    payload: usize,
-    available: usize,
-    deficit: usize,
-    recommended_side: Option<u32>,
-) -> String {
-    let advice = match recommended_side {
-        Some(side) => format!(
-            "A larger container would hold it: at about {side}x{side} it fits.\n       \
-             Ask for one with  --width {side} --height {side}  (both must be at \
-             least 2000).\n       \
-             Any width and height whose area is at least that will do; the \
-             suggestion is square only because one number is easier to quote."
-        ),
-        // No permitted container is large enough. This is the payload's size,
-        // not a dial the user can turn, so it is said plainly rather than
-        // dressed up as a resolution to reach for.
-        None => "No permitted container is large enough for a payload this size; \
-                 a generated container is capped at 128 megapixels.\n       \
-                 Split the payload, or compress it further before hiding it."
-            .to_owned(),
-    };
-
-    format!(
-        "Error: the payload does not fit in the requested container.\n       \
-         Compressed and encrypted it is {payload} bytes; the container admits \
-         {available}.\n       \
-         It is {deficit} bytes over.\n       \
-         That first figure is the payload after compression, not the size of \
-         the file.\n       \
-         {advice}"
-    )
-}
-
-/// Prints what the generation did, on stdout.
-///
-/// The last line is not decoration. Someone reaching this subcommand has no
-/// usable photograph and is likely to read "undetectable" as covering more than
-/// it does, so the one thing the mode does not do is said where it cannot be
-/// missed.
-fn print_generate_report(report: &GenerateReport, output: &Path) {
-    let (width, height) = report.image_dimensions;
-
-    println!("Container generated at {}", output.display());
-    println!("  Image dimensions: {width}x{height}");
-    println!(
-        "  Payload carried:  {} of {} bytes, compressed",
-        report.payload_bytes, report.capacity_bytes
-    );
-    println!(
-        "\nThis container does not hide that it was generated. It hides which of \
-         several\ngenerated containers carries a message. Prefer an unpublished \
-         photograph of your\nown whenever you have one."
-    );
-}
-
 /// Prints what the embedding did, on stdout.
 fn print_report(report: &EmbedReport, output: &Path) {
     let (width, height) = report.image_dimensions;
@@ -766,10 +521,6 @@ fn print_report(report: &EmbedReport, output: &Path) {
 /// file that is not a PNG at all, or that no decoder can read, is not a stego
 /// image anybody could have produced, and saying so reveals nothing an attacker
 /// could not determine by opening the file themselves.
-///
-/// A successful extraction whose binary payload is bound for a terminal returns a
-/// distinct guidance message instead; see [`write_recovered_to_stdout`] for why
-/// that is not the oracle the failure sentence avoids.
 fn run_extract(input: &Path, payload_out: Option<&Path>, force: bool) -> Result<(), String> {
     drop(load_container(input)?);
 
@@ -803,7 +554,16 @@ fn run_extract(input: &Path, payload_out: Option<&Path>, force: bool) -> Result<
     // copy of the plaintext is made that would outlive this function.
     match payload_out {
         Some(path) => write_recovered_file(path, plaintext.as_slice(), force),
-        None => write_recovered_to_stdout(plaintext.as_slice()),
+        // Written as raw bytes rather than printed as text: the payload is
+        // whatever the sender put in, and forcing it through a string
+        // conversion would corrupt any message that is not valid UTF-8.
+        None => io::stdout()
+            .write_all(plaintext.as_slice())
+            .and_then(|()| io::stdout().flush())
+            // A broken pipe or a full disk is not a failed extraction, but
+            // naming the difference here would reintroduce the oracle: the same
+            // sentence covers both.
+            .map_err(|_| EXTRACTION_FAILED.to_string()),
     }
 }
 
@@ -859,84 +619,6 @@ fn write_recovered_file(requested: &Path, plaintext: &[u8], force: bool) -> Resu
 
     payload::write_payload_file(&destination, plaintext, force)
         .map_err(|_| EXTRACTION_FAILED.to_string())
-}
-
-/// What extraction should do with a recovered payload bound for standard output.
-#[derive(Debug, PartialEq, Eq)]
-enum StdoutDelivery {
-    /// Write the bytes to standard output unchanged.
-    Raw,
-    /// Refuse: the payload is binary and standard output is a terminal.
-    RefuseBinary,
-}
-
-/// Decides how a recovered payload reaches standard output.
-///
-/// The bytes go out raw whenever standard output is **not** a terminal — a
-/// redirection or a pipe takes binary and text alike, and that path must never
-/// change, because it is the whole way a binary payload is captured
-/// (`extract > payload.bin`). Only a payload that is *both* binary *and* bound
-/// for an interactive terminal is refused: a terminal cannot render it. On
-/// Windows the console rejects bytes that are not valid UTF-8 outright — the
-/// write fails, which is the bug this function exists to turn into a clear
-/// message — and on a Unix terminal the same bytes would reset colours, move the
-/// cursor and ring the bell.
-///
-/// "Binary" is "not valid UTF-8", the same test [`payload::detect_extension`]
-/// draws between a `txt` and a `bin` payload, so the two agree on what counts as
-/// text.
-fn stdout_delivery(stdout_is_terminal: bool, plaintext: &[u8]) -> StdoutDelivery {
-    if stdout_is_terminal && std::str::from_utf8(plaintext).is_err() {
-        StdoutDelivery::RefuseBinary
-    } else {
-        StdoutDelivery::Raw
-    }
-}
-
-/// Writes a recovered payload to standard output, or explains why it will not.
-///
-/// Two destinations wear the same file descriptor and are not served the same
-/// way, as in [`read_plaintext`]:
-///
-/// - **A pipe or a redirection.** `extract > payload.bin`, or a pipe into
-///   another program. Every byte matters and the payload goes out raw whatever
-///   it contains. A write that fails here — a broken pipe, a full disk — folds
-///   into [`EXTRACTION_FAILED`] like every other post-success write error, so it
-///   cannot become an admission that the password was right.
-///
-/// - **A terminal.** A person is watching. A text payload is shown; a binary one
-///   is announced rather than dumped, with the two ways to capture it, for the
-///   reasons in [`stdout_delivery`].
-///
-/// # Why the terminal notice is not the oracle the failure sentence avoids
-///
-/// The notice reveals that extraction succeeded — but a text payload shown on
-/// the same terminal reveals exactly as much, and so does a file that appears
-/// under `--payload-out` or a redirection. Success is inherent in producing the
-/// plaintext and cannot be hidden from whoever runs the command. What the single
-/// [`EXTRACTION_FAILED`] sentence hides is *which* of the three failures happened
-/// and whether a post-success *write* failed on the redirected path; the notice
-/// is a refusal decided *before* any write and touches neither.
-///
-/// # Errors
-///
-/// Returns [`EXTRACTION_FAILED`] when the raw write fails, and the binary-payload
-/// guidance when standard output is a terminal the payload cannot be shown on.
-fn write_recovered_to_stdout(plaintext: &[u8]) -> Result<(), String> {
-    match stdout_delivery(io::stdout().is_terminal(), plaintext) {
-        // The payload is whatever the sender put in, written as raw bytes rather
-        // than through a string conversion that would corrupt anything not valid
-        // UTF-8.
-        StdoutDelivery::Raw => io::stdout()
-            .write_all(plaintext)
-            .and_then(|()| io::stdout().flush())
-            .map_err(|_| EXTRACTION_FAILED.to_string()),
-        StdoutDelivery::RefuseBinary => Err(format!(
-            "The payload is {} bytes of binary data and will not be written to the terminal.\n       \
-             Redirect it to a file (for example: > payload.bin) or pass --payload-out PATH.",
-            plaintext.len()
-        )),
-    }
 }
 
 /// Payload bytes `image` can carry, after encryption.
@@ -1128,69 +810,6 @@ mod tests {
         assert_eq!(message, format!("Error: {error}"));
     }
 
-    /// An oversized generated payload is told the numbers and a size to reach.
-    ///
-    /// The generator's counterpart of the embed test above, plus the one thing
-    /// this mode adds: the size is a parameter, so the message names a container
-    /// that would fit and the two flags that ask for it. Quoting the numbers but
-    /// not the way out would leave the user with a resolution they cannot act on.
-    #[test]
-    fn an_oversized_generated_payload_names_a_size_and_the_flags() {
-        let message = describe_generate_failure(&GenerateError::PayloadTooLarge {
-            payload: 1_782_778,
-            available: 1_499_980,
-            deficit: 282_798,
-            recommended_side: Some(2_200),
-        });
-
-        assert!(message.contains("1782778"), "got: {message}");
-        assert!(message.contains("1499980"), "got: {message}");
-        assert!(message.contains("282798"), "got: {message}");
-        assert!(
-            message.contains("after compression"),
-            "the message must not read as a claim about the file's size: {message}"
-        );
-        // The way out: a concrete size and the flags that request it.
-        assert!(message.contains("2200x2200"), "got: {message}");
-        assert!(message.contains("--width 2200"), "got: {message}");
-        assert!(message.contains("--height 2200"), "got: {message}");
-    }
-
-    /// A payload no container can hold is told so plainly, with no size to chase.
-    ///
-    /// The `None` recommendation is not "try a bigger number"; it is the pixel
-    /// ceiling, so the advice has to change from a resolution to a suggestion to
-    /// split or compress the payload.
-    #[test]
-    fn a_payload_beyond_every_container_is_told_plainly() {
-        let message = describe_generate_failure(&GenerateError::PayloadTooLarge {
-            payload: 60_000_000,
-            available: 1_499_980,
-            deficit: 58_500_020,
-            recommended_side: None,
-        });
-
-        assert!(message.contains("No permitted container"), "got: {message}");
-        assert!(message.contains("128 megapixels"), "got: {message}");
-        assert!(!message.contains("--width"), "no size to reach: {message}");
-    }
-
-    /// An out-of-range size is prefixed and pointed back at the two flags.
-    #[test]
-    fn an_out_of_range_size_names_the_flags() {
-        let message = describe_generate_failure(&GenerateError::DimensionsOutOfRange {
-            width: 1_500,
-            height: 3_000,
-            min_side: MIN_CONTAINER_SIDE,
-            max_pixels: stenoxide_core::generate::MAX_CONTAINER_PIXELS,
-        });
-
-        assert!(message.starts_with("Error:"), "got: {message}");
-        assert!(message.contains("1500x3000"), "got: {message}");
-        assert!(message.contains("--width"), "got: {message}");
-        assert!(message.contains("--height"), "got: {message}");
-    }
-
     /// A destination that is not there yet, and a directory, are both fine.
     ///
     /// The directory case is the one worth pinning: the payload is written
@@ -1211,50 +830,6 @@ mod tests {
             refuse_existing_destination(&taken).expect_err("an existing file must be refused");
         assert!(message.contains("taken.zip"), "got: {message}");
         assert!(message.contains("--force"), "got: {message}");
-    }
-
-    /// A redirection or a pipe takes binary and text alike.
-    ///
-    /// The path a binary payload is captured through — `extract > payload.bin` —
-    /// and the one that must never start sniffing content, because its consumer
-    /// is a file or another program that asked for every byte.
-    #[test]
-    fn a_redirection_takes_binary_and_text_alike() {
-        assert_eq!(stdout_delivery(false, b"plain text"), StdoutDelivery::Raw);
-        assert_eq!(
-            stdout_delivery(false, &[0xFF, 0xD8, 0xFF, 0xE0]),
-            StdoutDelivery::Raw,
-            "a redirection must take a JPEG's bytes unchanged"
-        );
-    }
-
-    /// A terminal shows text and refuses binary.
-    ///
-    /// The bug this fixes: a JPEG begins `FF D8 FF`, which is invalid UTF-8, and
-    /// a Windows console cannot be handed it — the write fails and the extraction
-    /// looks like it failed when it did not.
-    #[test]
-    fn a_terminal_shows_text_but_refuses_binary() {
-        assert_eq!(
-            stdout_delivery(true, b"a readable message"),
-            StdoutDelivery::Raw
-        );
-        assert_eq!(
-            stdout_delivery(true, &[0xFF, 0xD8, 0xFF, 0xE0]),
-            StdoutDelivery::RefuseBinary
-        );
-    }
-
-    /// Accented text is still text on a terminal.
-    ///
-    /// The binary test is UTF-8 validity, not ASCII, so a message with accents
-    /// is shown rather than refused.
-    #[test]
-    fn accented_text_is_shown_on_a_terminal() {
-        assert_eq!(
-            stdout_delivery(true, "café — ñandú".as_bytes()),
-            StdoutDelivery::Raw
-        );
     }
 
     /// The guidance names the terminator it expects.

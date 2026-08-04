@@ -31,10 +31,7 @@
 
 pub mod error;
 
-// Readable inside the crate rather than private to this module: `generate`
-// writes containers of its own and there is one function in this workspace that
-// turns a sample buffer into a PNG on disk.
-pub(crate) mod frame;
+mod frame;
 
 use std::path::Path;
 
@@ -46,9 +43,8 @@ use crate::crypto::aead::{
     compress_and_encrypt, decrypt_and_decompress, AEADCipher, AEADError, CryptoError,
     XChaCha20Poly1305Cipher,
 };
-use crate::crypto::expand::{expand_master_key, DerivedKeys};
+use crate::crypto::expand::expand_master_key;
 use crate::crypto::kdf::{Argon2Kdf, KeyDeriver};
-use crate::generate::read_generated;
 use crate::image_io::buffer::{CoverSource, ImageBuffer};
 use crate::image_io::phash::{
     compute_stable_phash, phash_salt_hypotheses, recover_phash_salt, PHashError, PHashSalt,
@@ -339,16 +335,6 @@ where
     /// carries no metadata at all — and the reason the expensive half of
     /// embedding, the HILL analysis, has no counterpart here.
     ///
-    /// # Why it reads two kinds of container
-    ///
-    /// A container may have been produced by [`crate::generate`] rather than by
-    /// [`EmbedPipeline::embed`], and nothing in the file says which — a marker
-    /// would be the one piece of metadata this design does not carry. Both
-    /// readings are therefore attempted under one key derivation, and every
-    /// failure is the single failure below. The second reading costs a stream
-    /// cipher over the container and no second Argon2id pass, because both
-    /// constructions derive from the same perceptual hash of the same image.
-    ///
     /// # Errors
     ///
     /// Returns a [`PipelineError`] wrapping the error of whichever layer
@@ -453,21 +439,6 @@ where
     /// permutation — is local and dropped before it returns, so a failed attempt
     /// leaves nothing behind for the next one to trip over.
     ///
-    /// # Why two readings, and why one derivation
-    ///
-    /// A container may have been generated *around* its payload rather than
-    /// embedded into — see [`crate::generate`] — and the two are read by
-    /// completely different code. Nothing in the file says which it is, and
-    /// nothing may: a flag would be the marker this project has gone to some
-    /// trouble not to carry, and a distinct error would let an attacker holding
-    /// a candidate password learn which construction produced an image.
-    ///
-    /// So both are tried and both failures are the same failure. It costs
-    /// almost nothing because the expensive step is Argon2id and the two
-    /// readings derive from the same perceptual hash of the same image: one
-    /// derivation serves both, and the second reading is a stream cipher over
-    /// the container and nothing else.
-    ///
     /// # Errors
     ///
     /// Returns a [`PipelineError`] only for failures that no other hypothesis
@@ -486,45 +457,6 @@ where
         let derived_keys = expand_master_key(&master_key)?;
         drop(master_key);
 
-        let outcome = match self.decode_trellis(stego_image, &derived_keys)? {
-            recovered @ Attempt::Recovered { .. } => recovered,
-            // The trellis found nothing. Under these very keys the container
-            // may still be one that was generated around its payload, and that
-            // reading is what the prefix would otherwise be discarded for.
-            Attempt::Rejected(prefix) => {
-                match read_generated(stego_image, &derived_keys, &self.aead) {
-                    Ok((plaintext, ciphertext_bytes)) => Attempt::Recovered {
-                        plaintext,
-                        ciphertext_bytes,
-                    },
-                    // Every way of failing here is the way the trellis reading
-                    // already failed, so the attempt ends exactly as it would
-                    // have without this second try — prefix included, because
-                    // the salt discriminator upstream still wants it.
-                    Err(_) => Attempt::Rejected(prefix),
-                }
-            }
-        };
-
-        drop(derived_keys);
-
-        Ok(outcome)
-    }
-
-    /// The Syndrome-Trellis reading of a container, under keys already derived.
-    ///
-    /// Steps 5 to 10 of the inverse chain. Split from [`Self::attempt_extract`]
-    /// so that the derivation above it happens once and serves both readings.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::attempt_extract`]: only failures no other hypothesis could
-    /// repair.
-    fn decode_trellis(
-        &self,
-        stego_image: &ImageBuffer,
-        derived_keys: &DerivedKeys,
-    ) -> Result<Attempt, PipelineError> {
         // Step 5 — the visiting order, reproduced rather than transmitted.
         let permutation =
             generate_pixel_permutation(stego_image.pixel_count(), derived_keys.stc_seed());
@@ -563,6 +495,7 @@ where
             derived_keys.nonce(),
             &self.aead,
         );
+        drop(derived_keys);
 
         match outcome {
             Ok(plaintext) => Ok(Attempt::Recovered {

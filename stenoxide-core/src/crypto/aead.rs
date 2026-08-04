@@ -18,12 +18,7 @@ use zeroize::Zeroizing;
 /// It is not secret and not transmitted: both sides recompute it. Its purpose
 /// is to make a ciphertext produced by `stenoxide` fail authentication if it is
 /// ever fed to a different XChaCha20-Poly1305 construction, and vice versa.
-///
-/// Readable inside the crate because [`crate::generate`] seals a buffer that is
-/// not simply `zstd(message)` and therefore cannot go through
-/// [`compress_and_encrypt`] — but must be bound to the same construction, so
-/// that one associated string covers everything this crate encrypts.
-pub(crate) const STENOXIDE_AAD: &[u8] = b"STENOXIDE-v1";
+const STENOXIDE_AAD: &[u8] = b"STENOXIDE-v1";
 
 /// Zstandard compression level. The maximum non-ultra level: the payload is
 /// small and compressed exactly once, so spending time here is free compared
@@ -199,37 +194,6 @@ impl AEADCipher for XChaCha20Poly1305Cipher {
     }
 }
 
-/// Compresses `plaintext` with Zstandard, at the one level this crate uses.
-///
-/// Split out of [`compress_and_encrypt`] because the generative container mode
-/// compresses at the same level and then seals the result inside a larger
-/// buffer of its own; the compression level is a property of the format both
-/// share, and there is one definition of it.
-///
-/// # Errors
-///
-/// Returns [`CryptoError::CompressionError`] if Zstandard fails.
-pub(crate) fn compress(plaintext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-    zstd::encode_all(plaintext, ZSTD_LEVEL)
-        .map(Zeroizing::new)
-        .map_err(|err| CryptoError::CompressionError(err.to_string()))
-}
-
-/// Decompresses an authenticated Zstandard frame.
-///
-/// The inverse of [`compress`]. Nothing must reach this that the Poly1305 tag
-/// has not already vouched for; both callers arrange that.
-///
-/// # Errors
-///
-/// Returns [`CryptoError::DecompressionError`] if the input is not a valid
-/// Zstandard stream.
-pub(crate) fn decompress(compressed: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-    zstd::decode_all(compressed)
-        .map(Zeroizing::new)
-        .map_err(|err| CryptoError::DecompressionError(err.to_string()))
-}
-
 /// Compresses `plaintext` with Zstandard and then encrypts the result.
 ///
 /// The order is mandatory. Compression must happen first, while the data still
@@ -248,7 +212,10 @@ pub fn compress_and_encrypt(
     nonce: &[u8; 24],
     cipher: &dyn AEADCipher,
 ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-    let compressed = compress(plaintext)?;
+    let compressed = Zeroizing::new(
+        zstd::encode_all(plaintext, ZSTD_LEVEL)
+            .map_err(|err| CryptoError::CompressionError(err.to_string()))?,
+    );
 
     let ciphertext = cipher.encrypt(enc_key, nonce, &compressed, STENOXIDE_AAD)?;
 
@@ -276,7 +243,10 @@ pub fn decrypt_and_decompress(
 ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     let compressed = cipher.decrypt(enc_key, nonce, ciphertext, STENOXIDE_AAD)?;
 
-    let plaintext = decompress(compressed.as_slice())?;
+    let plaintext = Zeroizing::new(
+        zstd::decode_all(compressed.as_slice())
+            .map_err(|err| CryptoError::DecompressionError(err.to_string()))?,
+    );
 
     drop(compressed);
     Ok(plaintext)

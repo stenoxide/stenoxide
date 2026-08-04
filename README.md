@@ -191,6 +191,18 @@ hiding the message inside a container:
 stenoxide generate --output container.png --input message.txt
 ```
 
+The default container is 2000x2000, the smallest and least conspicuous the mode
+draws. Capacity grows with the pixel count, so a payload that overflows the
+default needs a larger container — raise both sides together, each at least
+2000:
+
+```sh
+stenoxide generate --output container.png --input big.bin --width 2500 --height 2500
+```
+
+The refusal printed when a payload does not fit already names a size that would
+hold it, so this is rarely a number you have to work out yourself.
+
 It is a different construction, not a convenience. Each sample of the image is
 drawn from the texture's own distribution *conditioned* on the ciphertext bit it
 carries, so a container holding a message and one holding nothing are draws from

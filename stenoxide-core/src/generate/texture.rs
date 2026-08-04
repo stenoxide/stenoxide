@@ -55,8 +55,6 @@
 //! [`compute_hash_bits`]: crate::image_io::phash
 //! [`MAX_BPP`]: crate::stego::stc::MAX_BPP
 
-use super::CONTAINER_SIDE;
-
 /// Standard deviation of the grain, in levels.
 ///
 /// The security parameter of the whole mode, and the only one. The bias of the
@@ -69,11 +67,12 @@ pub(crate) const GRAIN_SIGMA: f32 = 2.0;
 
 /// Cells across the container, which is the side of the hash thumbnail.
 ///
-/// The whole design rule in one constant: one cell per thumbnail pixel.
-const CELLS: u32 = 32;
-
-/// Cell size, in image pixels. `62.5` for a 2000-pixel container.
-const CELL_SIZE: f32 = CONTAINER_SIDE as f32 / CELLS as f32;
+/// The whole design rule in one constant: one cell per thumbnail pixel. It is a
+/// count, not a length, so it is the same 32 whatever the container measures —
+/// the perceptual hash always resizes to a 32x32 thumbnail — and it is exactly
+/// what keeps the octave alignment the phash gate demands invariant under the
+/// container's size. See [`Texture::cell_size`].
+pub(crate) const CELLS: u32 = 32;
 
 /// Cells held in the precomputed grid along one axis.
 ///
@@ -142,15 +141,25 @@ pub(crate) struct Texture {
     /// The [`GRID`] by [`GRID`] cell grid, row-major, offset by one cell so
     /// that the ring outside the image is addressable.
     cells: Vec<Cell>,
+    /// Image pixels per cell along the horizontal axis, `width / CELLS`.
+    cell_size_x: f32,
+    /// Image pixels per cell along the vertical axis, `height / CELLS`.
+    cell_size_y: f32,
 }
 
 impl Texture {
-    /// Draws the field for `seed`.
+    /// Draws the field for `seed`, scaled to a `width` by `height` container.
     ///
     /// The seed comes from the system CSPRNG and is not persisted anywhere; see
     /// the module documentation of [`crate::generate`] for why it is treated as
     /// key material even though the picture it produces is public.
-    pub(crate) fn new(seed: u64) -> Self {
+    ///
+    /// The cell *grid* does not depend on the dimensions — it is always
+    /// [`CELLS`] cells per axis plus the ring — because the perceptual hash it
+    /// has to feed is always a 32x32 thumbnail. Only the mapping from a pixel to
+    /// its cell scales with the size, one axis at a time, so that a cell lands
+    /// on exactly one thumbnail pixel whatever the container's shape.
+    pub(crate) fn new(seed: u64, width: u32, height: u32) -> Self {
         let mixed = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
 
         let mut cells = Vec::with_capacity(GRID * GRID);
@@ -169,7 +178,21 @@ impl Texture {
             }
         }
 
-        Self { cells }
+        Self {
+            cells,
+            cell_size_x: Self::cell_size(width),
+            cell_size_y: Self::cell_size(height),
+        }
+    }
+
+    /// Image pixels one cell spans along an axis of the given length.
+    ///
+    /// `62.5` for a 2000-pixel side, and always one thumbnail pixel: the hash
+    /// resizes any side to [`CELLS`] samples, so `side / CELLS` pixels of the
+    /// container average into one thumbnail pixel no matter what `side` is. This
+    /// is the identity the whole mode's security argument leans on, stated once.
+    fn cell_size(side: u32) -> f32 {
+        side as f32 / CELLS as f32
     }
 
     /// The three base levels of the pixel at `(x, y)`, before grain.
@@ -179,8 +202,8 @@ impl Texture {
     /// slightly differently so the container is not three copies of one plane,
     /// which is an odd thing to hand any colour-aware analysis.
     pub(crate) fn base_levels(&self, x: u32, y: u32) -> [f32; 3] {
-        let fx = x as f32 / CELL_SIZE;
-        let fy = y as f32 / CELL_SIZE;
+        let fx = x as f32 / self.cell_size_x;
+        let fy = y as f32 / self.cell_size_y;
         let cx = fx.floor() as i32;
         let cy = fy.floor() as i32;
 
@@ -264,11 +287,24 @@ mod tests {
 
     use super::*;
 
+    /// A square container the size gate accepts, for the tests that want one.
+    const SIDE: u32 = 2000;
+
     /// The cell scale is the thumbnail scale, which is the whole design rule.
+    ///
+    /// Checked for a square container and for a rectangular one: the identity
+    /// holds per axis, so one thumbnail pixel is `side / CELLS` image pixels in
+    /// each direction independently, which is what makes a non-square container
+    /// feed the hash gate the same octave a square one does.
     #[test]
     fn one_cell_is_one_thumbnail_pixel() {
-        assert_eq!(CELL_SIZE, CONTAINER_SIDE as f32 / 32.0);
-        assert_eq!(CELL_SIZE, 62.5);
+        assert_eq!(Texture::cell_size(SIDE), SIDE as f32 / 32.0);
+        assert_eq!(Texture::cell_size(2000), 62.5);
+        assert_eq!(Texture::cell_size(2500), 2500.0 / 32.0);
+
+        let rectangle = Texture::new(0x5EED, 2000, 4000);
+        assert_eq!(rectangle.cell_size_x, 2000.0 / 32.0);
+        assert_eq!(rectangle.cell_size_y, 4000.0 / 32.0);
     }
 
     /// Every base level stays far enough from both ends of the range for both
@@ -277,26 +313,29 @@ mod tests {
     /// The property the rejection sampler's termination rests on, checked over
     /// the corners and the interior of a whole container rather than argued
     /// for: a single level pressed against the clamp would be a loop that never
-    /// ends.
+    /// ends. A rectangular container is swept as well, because its anisotropic
+    /// cell mapping is a different set of phases and must clear the clamps too.
     #[test]
     fn no_base_level_approaches_the_ends_of_the_range() {
-        let texture = Texture::new(0x5EED);
+        for (width, height) in [(SIDE, SIDE), (SIDE, 2 * SIDE), (3 * SIDE, SIDE)] {
+            let texture = Texture::new(0x5EED, width, height);
 
-        // Every 37th pixel of every 37th row: coprime with the cell size in
-        // both axes, so the walk lands in every phase of the pattern rather
-        // than sampling the same corner of each cell.
-        for y in (0..CONTAINER_SIDE).step_by(37) {
-            for x in (0..CONTAINER_SIDE).step_by(37) {
-                for level in texture.base_levels(x, y) {
-                    assert!(
-                        (LEVEL_FLOOR..=LEVEL_CEILING).contains(&level),
-                        "level {level} at ({x}, {y}) is outside the safe range"
-                    );
-                    // Ten standard deviations of grain from either end, which
-                    // is the property the sampler needs stated in the units it
-                    // is threatened by.
-                    assert!(level > 10.0 * GRAIN_SIGMA);
-                    assert!(level < 255.0 - 10.0 * GRAIN_SIGMA);
+            // Every 37th pixel of every 37th row: coprime with the cell size in
+            // both axes, so the walk lands in every phase of the pattern rather
+            // than sampling the same corner of each cell.
+            for y in (0..height).step_by(37) {
+                for x in (0..width).step_by(37) {
+                    for level in texture.base_levels(x, y) {
+                        assert!(
+                            (LEVEL_FLOOR..=LEVEL_CEILING).contains(&level),
+                            "level {level} at ({x}, {y}) is outside the safe range"
+                        );
+                        // Ten standard deviations of grain from either end,
+                        // which is the property the sampler needs stated in the
+                        // units it is threatened by.
+                        assert!(level > 10.0 * GRAIN_SIGMA);
+                        assert!(level < 255.0 - 10.0 * GRAIN_SIGMA);
+                    }
                 }
             }
         }
@@ -308,9 +347,9 @@ mod tests {
     /// fixes the perceptual hash, and the final container has to reproduce it.
     #[test]
     fn the_field_is_reproducible_from_its_seed() {
-        let first = Texture::new(7);
-        let again = Texture::new(7);
-        let other = Texture::new(8);
+        let first = Texture::new(7, SIDE, SIDE);
+        let again = Texture::new(7, SIDE, SIDE);
+        let other = Texture::new(8, SIDE, SIDE);
 
         let mut differs = false;
         for (x, y) in [(0u32, 0u32), (1, 999), (1999, 1999), (500, 1200)] {
@@ -324,7 +363,7 @@ mod tests {
     /// The ring outside the image is addressable and the interior is complete.
     #[test]
     fn the_grid_covers_every_neighbour_of_every_pixel() {
-        let texture = Texture::new(1);
+        let texture = Texture::new(1, SIDE, SIDE);
 
         assert!(texture.cell(-1, -1).is_some());
         assert!(texture.cell(CELLS as i32, CELLS as i32).is_some());
@@ -335,7 +374,7 @@ mod tests {
     /// The channels are tinted rather than copied.
     #[test]
     fn the_three_planes_are_not_one_plane_repeated() {
-        let levels = Texture::new(3).base_levels(640, 480);
+        let levels = Texture::new(3, SIDE, SIDE).base_levels(640, 480);
 
         assert!(levels[0] != levels[1] || levels[1] != levels[2]);
     }

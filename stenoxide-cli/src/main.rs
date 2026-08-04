@@ -1,13 +1,14 @@
 //! Command line front-end of `stenoxide`.
 //!
-//! Three subcommands, two of which read the password interactively:
+//! Four subcommands, three of which read the password interactively:
 //!
 //! ```text
-//! stenoxide scan    ./photos --recursive
-//! stenoxide embed   --input cover.png --output stego.png   < message.txt
-//! stenoxide embed   --input cover.png --output stego.png --payload secret.zip
-//! stenoxide extract --input stego.png                      > message.txt
-//! stenoxide extract --input stego.png --payload-out secret.zip
+//! stenoxide scan     ./photos --recursive
+//! stenoxide embed    --input cover.png --output stego.png   < message.txt
+//! stenoxide embed    --input cover.png --output stego.png --payload secret.zip
+//! stenoxide extract  --input stego.png                      > message.txt
+//! stenoxide extract  --input stego.png --payload-out secret.zip
+//! stenoxide generate --output container.png --input message.txt
 //! ```
 //!
 //! The payload has always been arbitrary bytes rather than text, so the file
@@ -51,6 +52,21 @@
 //! given, and it is the pipeline's verdict, not this one, that decides whether
 //! anything is embedded.
 //!
+//! # Why `generate` is a subcommand and not an offer
+//!
+//! `embed` needs a container, and the tempting interface is to notice that it
+//! was given none and offer to make one. It is the wrong place for it twice
+//! over. A user who omitted `--input` made a typo and is not asking to change
+//! their security model, so the offer would turn a slip into a hurried
+//! decision; and the operation that fits behind such a prompt is *generate,
+//! then embed*, which is the weaker of the two constructions by a wide margin —
+//! roughly 7 KB of capacity against 1.4 MB, and a detectable container against
+//! one that provably is not. The convenient path would deliver the worse mode.
+//!
+//! Discoverability belongs in `scan` instead: when it walks a directory and
+//! accepts nothing at all, it says so in one line. That user has already
+//! demonstrated that they looked.
+//!
 //! # Why the two subcommands report failure so differently
 //!
 //! Embedding is a local operation whose failures are the user's to fix — a
@@ -78,6 +94,7 @@ use zeroize::Zeroizing;
 
 use stenoxide_core::cost::hill::HillCostProvider;
 use stenoxide_core::cost::CostProvider;
+use stenoxide_core::generate::{generate_container, GenerateError, GenerateReport};
 use stenoxide_core::image_io::buffer::ImageBuffer;
 use stenoxide_core::image_io::phash::compute_stable_phash;
 use stenoxide_core::image_io::validate::{load_and_validate, ValidationError};
@@ -104,6 +121,28 @@ const PASSWORD_PROMPT: &str = "Password: ";
 /// given in [`read_plaintext`]: it is ordinary text, so no shell can intercept
 /// it on its way to this process.
 const END_OF_MESSAGE: &str = ".";
+
+/// The long help of `generate`, which has one thing it must say.
+///
+/// A user reaches this subcommand because nothing they own can be used as a
+/// container, and the mode answers a narrower question than they are likely to
+/// assume. It hides *which* of several generated containers carries a message,
+/// completely and provably. It does not hide that the file was generated: it
+/// looks like a synthetic texture, and a folder of them is conspicuous in a way
+/// no analysis of any single file needs to be.
+const GENERATE_LONG_ABOUT: &str = "\
+Build a container around a message instead of hiding it inside an existing image.
+
+For when there is no usable photograph — a camera that only writes JPEG, no way
+to move pictures across from a phone. The container is drawn sample by sample,
+each one conditioned on the ciphertext bit it carries, so a container holding a
+message and one holding nothing are draws from the same distribution and no
+detector can separate them. It carries about 1.4 MB, against the 8 KB an image
+of the same size admits by embedding.
+
+It does not hide that the container was generated. It looks like a synthetic
+texture, and a folder full of them is itself the thing worth explaining. Prefer
+a photograph of your own that has never been published, whenever you have one.";
 
 /// What the user is told before they are expected to type a message.
 ///
@@ -143,6 +182,17 @@ enum Command {
         /// standard input is not read at all and any redirection is ignored.
         #[arg(long, value_name = "PATH")]
         payload: Option<PathBuf>,
+    },
+    /// Build a container around a message, for when there is no usable photo.
+    #[command(long_about = GENERATE_LONG_ABOUT)]
+    Generate {
+        /// Where to write the container. Always written as PNG.
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+        /// File to hide. Read from standard input when absent; when given,
+        /// standard input is not read at all and any redirection is ignored.
+        #[arg(long, value_name = "PATH")]
+        input: Option<PathBuf>,
     },
     /// Recover a hidden message from a stego image and write it to standard
     /// output.
@@ -189,6 +239,7 @@ fn main() -> ExitCode {
             output,
             payload,
         } => run_embed(input, output, payload.as_deref()),
+        Command::Generate { output, input } => run_generate(output, input.as_deref()),
         Command::Extract {
             input,
             payload_out,
@@ -495,6 +546,103 @@ fn describe_embed_failure(error: &PipelineError) -> String {
          Use a container of higher resolution; stenoxide scan reports what each \
          one can carry."
     )
+}
+
+/// Runs the generative path.
+///
+/// The shape of [`run_embed`] minus the container: the payload is settled
+/// before the passphrase is asked for, for the same reason, and there is no
+/// image to validate because there is no image yet.
+///
+/// # Errors
+///
+/// Returns the message to print when the payload file cannot be read, the
+/// payload does not fit, or the container cannot be generated or written.
+fn run_generate(output: &Path, input: Option<&Path>) -> Result<(), String> {
+    // A payload path that cannot be read is settled before the prompt, exactly
+    // as in `run_embed`: a mistyped path is a wasted passphrase either way, and
+    // the handle is kept so that the file checked and the file read are one.
+    let source = match input {
+        Some(path) => Some((payload::open_payload_file(path)?, path)),
+        None => None,
+    };
+
+    let password = read_password()?;
+
+    let plaintext = match source {
+        Some((handle, path)) => payload::read_payload_file(handle, path)?,
+        None => read_plaintext()?,
+    };
+
+    if plaintext.is_empty() {
+        return Err("Error: the message is empty; nothing to hide.".to_string());
+    }
+
+    // Generation is the slowest thing this program does — two renders of twelve
+    // million samples, the container gates over four megapixels, and a PNG of
+    // incompressible content — and it says nothing while it works. The
+    // indicator reveals nothing either: the cost is a function of a fixed
+    // container size and of how many candidate textures the gates refuse.
+    let activity = progress::Activity::start();
+
+    let outcome = generate_container(plaintext, password, output);
+
+    activity.finish();
+
+    let report = outcome.map_err(|err| describe_generate_failure(&err))?;
+
+    print_generate_report(&report, output);
+    Ok(())
+}
+
+/// Turns a failure of the generator into the sentence the user reads.
+///
+/// Only the capacity refusal is rewritten, on the same principle as
+/// [`describe_embed_failure`]: the figure quoted is the payload *after*
+/// compression, and a message that did not say so would read as a false claim
+/// about the size of the user's file.
+fn describe_generate_failure(error: &GenerateError) -> String {
+    let GenerateError::PayloadTooLarge {
+        payload,
+        available,
+        deficit,
+    } = error
+    else {
+        return format!("Error: {error}");
+    };
+
+    format!(
+        "Error: the payload does not fit in a generated container.\n       \
+         Compressed and encrypted it is {payload} bytes; a container admits \
+         {available}.\n       \
+         It is {deficit} bytes over.\n       \
+         That first figure is the payload after compression, not the size of \
+         the file.\n       \
+         A generated container is always 2000x2000, so this limit is not one \
+         a larger image can raise."
+    )
+}
+
+/// Prints what the generation did, on stdout.
+///
+/// The last line is not decoration. Someone reaching this subcommand has no
+/// usable photograph and is likely to read "undetectable" as covering more than
+/// it does, so the one thing the mode does not do is said where it cannot be
+/// missed.
+fn print_generate_report(report: &GenerateReport, output: &Path) {
+    let (width, height) = report.image_dimensions;
+
+    println!("Container generated at {}", output.display());
+    println!("  Image dimensions: {width}x{height}");
+    println!(
+        "  Payload carried:  {} of {} bytes, compressed",
+        report.payload_bytes, report.capacity_bytes
+    );
+    println!(
+        "\nThis container does not hide that it was generated. It hides which of \
+         several\ngenerated containers carries a message. Prefer an unpublished \
+         photograph of your\nown whenever you have one."
+    );
 }
 
 /// Prints what the embedding did, on stdout.

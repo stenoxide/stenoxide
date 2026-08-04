@@ -48,6 +48,14 @@ key. Extraction needs no cost map and no stored position list: the salt, the
 permutation and the region layout are all recomputed from the image and the
 password.
 
+For a caller with no usable container, `generate::generate_container` builds one
+around the payload instead: every sample is drawn from the texture's own
+distribution conditioned on the ciphertext bit it carries, so a container holding
+a message and one holding nothing are draws from the same distribution. It
+carries about 1.45 MB rather than 8 KB, and it hides *which* container holds a
+message rather than whether the file was generated. `EmbedPipeline::extract`
+reads both kinds without being told which it was handed.
+
 ## The `ffi-stc` feature
 
 **Deprecated, and off by default.** The Syndrome-Trellis coder is now

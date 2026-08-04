@@ -114,7 +114,7 @@ use stenoxide_core::generate::{
     MIN_CONTAINER_SIDE,
 };
 use stenoxide_core::image_io::buffer::ImageBuffer;
-use stenoxide_core::image_io::phash::compute_stable_phash;
+use stenoxide_core::image_io::phash::{compute_stable_phash, PHashError};
 use stenoxide_core::image_io::validate::{load_and_validate, ValidationError};
 use stenoxide_core::pipeline::{EmbedPipeline, EmbedReport, PipelineError};
 use stenoxide_core::stego::sizer::{compute_capacity, EmbeddingMode, SizerError};
@@ -166,6 +166,20 @@ the error printed when a payload overflows names a size that would hold it.
 It does not hide that the container was generated. It looks like a synthetic
 texture, and a folder full of them is itself the thing worth explaining. Prefer
 a photograph of your own that has never been published, whenever you have one.";
+
+/// The line `embed` adds when it refuses the photograph it was given.
+///
+/// The same pointer `scan` prints when it accepts nothing, from the other side:
+/// there, a user who looked is told that `generate` exists; here, a user who
+/// picked one file straight away is told that there is a way to find out which
+/// of the others would have worked. It is offered only by `embed`, because it
+/// answers a question only that user is asking — see [`describe_embed_rejection`].
+///
+/// The leading newline and seven spaces are the continuation indent every
+/// multi-line message in this file already uses, so the advice lines up under
+/// the sentence it belongs to rather than under `Error:`.
+const ANOTHER_CONTAINER_HINT: &str = "\n       \
+     stenoxide scan <folder> reports which of your other photos can be used.";
 
 /// What the user is told before they are expected to type a message.
 ///
@@ -465,6 +479,17 @@ fn load_container(path: &Path) -> Result<ImageBuffer, String> {
     load_and_validate(path).map_err(|error| describe_rejection(path, &error))
 }
 
+/// Loads a container for `embed`, which has one more thing to say than
+/// [`load_container`].
+///
+/// # Errors
+///
+/// Returns the message to print, already phrased for a terminal; see
+/// [`describe_embed_rejection`].
+fn load_container_for_embed(path: &Path) -> Result<ImageBuffer, String> {
+    load_and_validate(path).map_err(|error| describe_embed_rejection(path, &error))
+}
+
 /// Turns a validation failure into advice.
 ///
 /// The layer that refused says what is wrong with the file, which is the right
@@ -528,6 +553,37 @@ fn describe_rejection(path: &Path, error: &ValidationError) -> String {
     }
 }
 
+/// The rejection as `embed` reports it: [`describe_rejection`], plus a way to
+/// find a container that would work.
+///
+/// A layer above that function rather than a change to it, because the very
+/// same text serves `extract` — [`load_container`] is called by both — and there
+/// the advice would answer a question nobody asked. Whoever runs `extract` was
+/// handed one particular image and is trying to recover what is in it; they are
+/// not looking through a folder for a better photograph, and `scan` has nothing
+/// to offer them.
+///
+/// Only the refusals that are about *this image* are extended. A file that
+/// cannot be read, or whose PNG stream is malformed, is a broken file rather
+/// than a wrong choice of photograph: that user needs their file back, not a
+/// different one, and pointing them at `scan` would be changing the subject.
+fn describe_embed_rejection(path: &Path, error: &ValidationError) -> String {
+    let message = describe_rejection(path, error);
+
+    match error {
+        ValidationError::JpegDetected
+        | ValidationError::WebpDetected
+        | ValidationError::NotPng
+        | ValidationError::ImageTooSmall { .. }
+        | ValidationError::ImageTooLarge { .. }
+        | ValidationError::UnsupportedColorSpace { .. }
+        | ValidationError::JpegArtifactsDetected { .. } => {
+            format!("{message}{ANOTHER_CONTAINER_HINT}")
+        }
+        ValidationError::IoError(_) | ValidationError::DecodingError(_) => message,
+    }
+}
+
 /// Runs the embedding path.
 ///
 /// # Errors
@@ -540,7 +596,7 @@ fn describe_rejection(path: &Path, error: &ValidationError) -> String {
 fn run_embed(input: &Path, output: &Path, payload: Option<&Path>) -> Result<(), String> {
     // Before anything is asked of the user: a container that will be refused is
     // refused now, rather than after a passphrase has been typed for nothing.
-    drop(load_container(input)?);
+    drop(load_container_for_embed(input)?);
 
     // And for the same reason, a payload path that cannot be read is settled
     // here too — a mistyped path is exactly as much a wasted passphrase as a
@@ -593,28 +649,39 @@ fn run_embed(input: &Path, output: &Path, payload: Option<&Path>) -> Result<(), 
 /// message says so. Reporting the file's size instead would tell a user that
 /// their 30 KB of notes do not fit in a container that admits 22 KB, which is
 /// false: Zstandard runs first, and text collapses.
+///
+/// Two other refusals are left in the words their own layer wrote and given the
+/// pointer at `scan` that [`describe_embed_rejection`] adds, for the same
+/// reason: a container too smooth to hide anything in, and one whose perceptual
+/// hash will not survive the embedding, are both verdicts on this photograph and
+/// on no other. They arrive here rather than at the validation gate because
+/// neither can be decided without analysing every pixel. This function is
+/// reached only from `run_embed`, so the pointer stays out of `extract` as it
+/// does there.
 fn describe_embed_failure(error: &PipelineError) -> String {
-    let PipelineError::Sizer(SizerError::PayloadTooLarge {
-        payload,
-        available,
-        deficit,
-    }) = error
-    else {
-        return format!("Error: {error}");
-    };
-
-    format!(
-        "Error: the payload does not fit in this container.\n       \
-         Compressed and encrypted it is {payload} bytes; the container admits \
-         {available}.\n       \
-         It is {deficit} bytes over.\n       \
-         That first figure is the payload after compression, not the size of \
-         the file:\n       \
-         text shrinks a great deal, so a much larger file may still fit and a \
-         smaller one may not.\n       \
-         Use a container of higher resolution; stenoxide scan reports what each \
-         one can carry."
-    )
+    match error {
+        PipelineError::Sizer(SizerError::PayloadTooLarge {
+            payload,
+            available,
+            deficit,
+        }) => format!(
+            "Error: the payload does not fit in this container.\n       \
+             Compressed and encrypted it is {payload} bytes; the container \
+             admits {available}.\n       \
+             It is {deficit} bytes over.\n       \
+             That first figure is the payload after compression, not the size \
+             of the file:\n       \
+             text shrinks a great deal, so a much larger file may still fit and \
+             a smaller one may not.\n       \
+             Use a container of higher resolution; stenoxide scan reports what \
+             each one can carry."
+        ),
+        PipelineError::Cost(_)
+        | PipelineError::PHash(PHashError::InsufficientStability { .. }) => {
+            format!("Error: {error}.{ANOTHER_CONTAINER_HINT}")
+        }
+        other => format!("Error: {other}"),
+    }
 }
 
 /// Runs the generative path.
@@ -1114,6 +1181,7 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use clap::ValueEnum;
+    use stenoxide_core::cost::hill::CostError;
 
     use super::*;
 
@@ -1232,6 +1300,119 @@ mod tests {
         let message = describe_embed_failure(&error);
 
         assert_eq!(message, format!("Error: {error}"));
+    }
+
+    /// A container refused for this image alone points at `scan`.
+    ///
+    /// Every rejection that says something about *this photograph* — its
+    /// format, its size, its pixel layout, the JPEG grid in it — is a rejection
+    /// the user answers by choosing a different one, and `scan` is how they find
+    /// which of theirs would do. The reason the whole list is pinned rather than
+    /// one case: the hint is added per variant, so a variant left out is a user
+    /// who reaches the same dead end through a different door.
+    #[test]
+    fn a_rejected_photograph_is_pointed_at_scan() {
+        let path = Path::new("photo.png");
+        let rejections = [
+            ValidationError::JpegDetected,
+            ValidationError::WebpDetected,
+            ValidationError::NotPng,
+            ValidationError::ImageTooSmall {
+                width: 800,
+                height: 600,
+                min: 2_000,
+            },
+            ValidationError::ImageTooLarge {
+                width: 20_000,
+                height: 20_000,
+                pixels: 400_000_000,
+                max: 134_217_728,
+            },
+            ValidationError::UnsupportedColorSpace {
+                found: "Rgb32F".to_owned(),
+            },
+            ValidationError::JpegArtifactsDetected { ratio: 1.8 },
+        ];
+
+        for error in &rejections {
+            let message = describe_embed_rejection(path, error);
+
+            assert!(
+                message.contains("stenoxide scan"),
+                "{error:?} must point at scan, got: {message}"
+            );
+            // The advice is added to the existing explanation, never in place
+            // of it: the user still has to be told what was wrong with the file.
+            assert!(
+                message.starts_with(&describe_rejection(path, error)),
+                "the original explanation must survive, got: {message}"
+            );
+        }
+    }
+
+    /// A file that is broken is not told to go and find another one.
+    ///
+    /// The distinction the hint rests on: a missing file and a malformed PNG are
+    /// problems with the file itself, and a user whose disk failed mid-copy is
+    /// not choosing between photographs.
+    #[test]
+    fn a_broken_file_is_not_pointed_at_scan() {
+        let path = Path::new("photo.png");
+        let broken = [
+            ValidationError::IoError(io::Error::new(io::ErrorKind::NotFound, "no such file")),
+            ValidationError::DecodingError("truncated stream".to_owned()),
+        ];
+
+        for error in &broken {
+            let message = describe_embed_rejection(path, error);
+
+            assert_eq!(
+                message,
+                describe_rejection(path, error),
+                "{error:?} must be reported exactly as it always was"
+            );
+        }
+    }
+
+    /// Extraction reports a rejected image exactly as it always did.
+    ///
+    /// The hint belongs to `embed` alone. Somebody running `extract` was given
+    /// one image and wants what is inside it; telling them to scan a folder for
+    /// a better photograph would answer a question they did not ask, which is
+    /// why the advice is a layer above the shared description rather than in it.
+    #[test]
+    fn extraction_keeps_the_plain_rejection() {
+        let path = Path::new("stego.png");
+        let message = describe_rejection(path, &ValidationError::NotPng);
+
+        assert!(
+            !message.contains("stenoxide scan"),
+            "the shared description must stay free of the embed hint, got: {message}"
+        );
+    }
+
+    /// A container too smooth, or too unstable, to embed in points at `scan`.
+    ///
+    /// These two refusals arrive after the analysis rather than at the door,
+    /// because neither can be decided without reading every pixel — but they say
+    /// the same thing as the rejections above: this photograph will not do. The
+    /// sentence the layer wrote is kept in full; only the way out is added.
+    #[test]
+    fn an_untextured_container_is_pointed_at_scan() {
+        let smooth = PipelineError::Cost(CostError::ExcessiveSmoothRegions { ratio: 0.42 });
+        let message = describe_embed_failure(&smooth);
+
+        assert!(message.contains("too smooth"), "got: {message}");
+        assert!(message.contains("stenoxide scan"), "got: {message}");
+
+        let unstable = PipelineError::PHash(PHashError::InsufficientStability {
+            unstable_bits: 3,
+            threshold: 0.05,
+        });
+        let message = describe_embed_failure(&unstable);
+
+        assert!(message.contains("perceptually unstable"), "got: {message}");
+        assert!(message.contains("stenoxide scan"), "got: {message}");
     }
 
     /// An oversized generated payload is told the numbers and a size to reach.

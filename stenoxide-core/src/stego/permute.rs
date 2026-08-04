@@ -164,3 +164,86 @@ pub(crate) fn generate_pixel_permutation(n_pixels: usize, stc_seed: &[u8; 32]) -
 
     permutation
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::HashSet;
+
+    /// The seed every test below shuffles under.
+    const SEED: [u8; 32] = [0x3Cu8; 32];
+
+    /// Positions the tests shuffle. Large enough that a biased or truncated
+    /// shuffle shows up, small enough to be free.
+    const POSITIONS: usize = 4_096;
+
+    /// The result is a permutation: every index appears exactly once.
+    ///
+    /// The property the embedding layer depends on. A shuffle that dropped or
+    /// repeated an index would make the coder visit a position twice and leave
+    /// another carrying nothing, which no round trip would recover.
+    #[test]
+    fn the_shuffle_is_a_bijection() {
+        let permutation = generate_pixel_permutation(POSITIONS, &SEED);
+
+        assert_eq!(permutation.len(), POSITIONS);
+        assert_eq!(
+            permutation
+                .iter()
+                .copied()
+                .collect::<HashSet<usize>>()
+                .len(),
+            POSITIONS
+        );
+        assert!(permutation.iter().all(|&index| index < POSITIONS));
+    }
+
+    /// The same seed and the same length always give the same order.
+    ///
+    /// Not a convenience: the extraction path rebuilds the visiting order from
+    /// the seed alone, so a single differing draw loses the payload.
+    #[test]
+    fn the_shuffle_is_reproducible() {
+        assert_eq!(
+            generate_pixel_permutation(POSITIONS, &SEED),
+            generate_pixel_permutation(POSITIONS, &SEED)
+        );
+    }
+
+    /// A different seed gives a different order.
+    #[test]
+    fn a_different_seed_visits_the_positions_differently() {
+        let other = generate_pixel_permutation(POSITIONS, &[0xC3u8; 32]);
+
+        assert_ne!(generate_pixel_permutation(POSITIONS, &SEED), other);
+    }
+
+    /// The order is a shuffle and not the identity with a few swaps.
+    ///
+    /// A permutation drawn uniformly leaves about one position in `e` fixed on
+    /// average, i.e. a handful out of four thousand. Anything close to the
+    /// identity would mean the keystream is not reaching the swap.
+    #[test]
+    fn the_shuffle_moves_almost_every_position() {
+        let permutation = generate_pixel_permutation(POSITIONS, &SEED);
+
+        let fixed = permutation
+            .iter()
+            .enumerate()
+            .filter(|(index, &value)| *index == value)
+            .count();
+
+        assert!(
+            fixed < POSITIONS / 100,
+            "{fixed} positions were left in place"
+        );
+    }
+
+    /// Degenerate lengths are the identity, and consume no keystream.
+    #[test]
+    fn nothing_is_shuffled_below_two_positions() {
+        assert!(generate_pixel_permutation(0, &SEED).is_empty());
+        assert_eq!(generate_pixel_permutation(1, &SEED), vec![0]);
+    }
+}

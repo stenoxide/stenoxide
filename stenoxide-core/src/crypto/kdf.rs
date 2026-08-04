@@ -160,3 +160,92 @@ impl KeyDeriver for Argon2Kdf {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // The crate-wide bans on panicking helpers reach into `cfg(test)` code as
+    // well. A test that cannot panic cannot fail, so they are lifted here and
+    // only here.
+    #![allow(clippy::expect_used)]
+    #![allow(clippy::panic)]
+
+    use super::*;
+
+    /// A salt of the shape the perceptual hash produces.
+    fn salt(fill: u8) -> PHashSalt {
+        PHashSalt::new([fill; 32])
+    }
+
+    /// The same password and the same container always give the same key.
+    ///
+    /// The property extraction rests on: no key material travels with the
+    /// payload, so the receiver has to arrive at the same 32 bytes from the
+    /// password and the image alone.
+    #[test]
+    fn derivation_is_deterministic_in_both_its_inputs() {
+        let kdf = Argon2Kdf::low_cost_for_tests();
+
+        let first = kdf.derive(b"passphrase", &salt(1)).expect("must derive");
+        let again = kdf.derive(b"passphrase", &salt(1)).expect("must derive");
+        let other_password = kdf.derive(b"passphrasf", &salt(1)).expect("must derive");
+        let other_salt = kdf.derive(b"passphrase", &salt(2)).expect("must derive");
+
+        assert_eq!(first.as_bytes(), again.as_bytes());
+        assert_ne!(first.as_bytes(), other_password.as_bytes());
+        assert_ne!(first.as_bytes(), other_salt.as_bytes());
+        assert_eq!(first.as_bytes().len(), MASTER_KEY_LEN);
+    }
+
+    /// An empty password is refused rather than stretched.
+    #[test]
+    fn an_empty_password_is_refused() {
+        let error = Argon2Kdf::low_cost_for_tests()
+            .derive(&[], &salt(1))
+            .map(|_| ())
+            .expect_err("an empty password must never be honoured");
+
+        assert!(matches!(error, KdfError::EmptyPassword), "got: {error:?}");
+    }
+
+    /// Parameters the implementation rejects are reported rather than assumed
+    /// away.
+    ///
+    /// The production constructor cannot produce such a set — that is the point
+    /// of compiling the cost in — but building `Params` is fallible and the
+    /// failure has to have somewhere to go.
+    #[test]
+    fn parameters_argon2_refuses_are_reported() {
+        let broken = Argon2Kdf {
+            m_cost: 0,
+            t_cost: 0,
+            parallelism: 0,
+        };
+
+        let error = broken
+            .derive(b"passphrase", &salt(1))
+            .map(|_| ())
+            .expect_err("a memory cost of zero must be refused");
+
+        assert!(matches!(error, KdfError::Argon2Error(_)), "got: {error:?}");
+    }
+
+    /// The production parameters are the ones this project considers secure.
+    #[test]
+    fn the_default_deriver_carries_the_compiled_in_cost() {
+        let kdf = Argon2Kdf::default_secure();
+
+        assert_eq!(
+            (kdf.m_cost, kdf.t_cost, kdf.parallelism),
+            (M_COST, T_COST, PARALLELISM)
+        );
+    }
+
+    /// Both failures explain themselves.
+    #[test]
+    fn every_failure_explains_itself() {
+        assert!(KdfError::EmptyPassword.to_string().contains("empty"));
+        assert!(KdfError::Argon2Error("bad params".to_owned())
+            .to_string()
+            .contains("bad params"));
+    }
+}

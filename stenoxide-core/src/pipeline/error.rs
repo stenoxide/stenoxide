@@ -175,3 +175,88 @@ impl From<OutputError> for PipelineError {
         PipelineError::Output(err)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::crypto::aead::AEADError;
+
+    /// One error of every lower layer, already lifted into this one.
+    ///
+    /// Built through the `From` conversions rather than by naming the variants,
+    /// so the list also pins that every layer can reach the pipeline with the
+    /// `?` operator.
+    fn one_of_each() -> Vec<PipelineError> {
+        vec![
+            ValidationError::NotPng.into(),
+            PHashError::RecoveryFailed.into(),
+            KdfError::EmptyPassword.into(),
+            ExpandError::HkdfError("output too long".to_owned()).into(),
+            CostError::InsufficientGlobalTexture.into(),
+            SizerError::PayloadTooLarge {
+                payload: 100,
+                available: 10,
+                deficit: 90,
+            }
+            .into(),
+            StcError::InvalidCostMap.into(),
+            CryptoError::AEADError(AEADError::AuthenticationFailed).into(),
+            OutputError::MalformedBuffer.into(),
+        ]
+    }
+
+    /// Each conversion lands in the variant named after its layer.
+    #[test]
+    fn every_layer_lifts_into_its_own_variant() {
+        let lifted = one_of_each();
+
+        assert!(matches!(lifted[0], PipelineError::Validation(_)));
+        assert!(matches!(lifted[1], PipelineError::PHash(_)));
+        assert!(matches!(lifted[2], PipelineError::Kdf(_)));
+        assert!(matches!(lifted[3], PipelineError::Expand(_)));
+        assert!(matches!(lifted[4], PipelineError::Cost(_)));
+        assert!(matches!(lifted[5], PipelineError::Sizer(_)));
+        assert!(matches!(lifted[6], PipelineError::Stc(_)));
+        assert!(matches!(lifted[7], PipelineError::Crypto(_)));
+        assert!(matches!(lifted[8], PipelineError::Output(_)));
+    }
+
+    /// The wrapper adds no prefix: the message a user sees is the one the layer
+    /// that refused wrote.
+    #[test]
+    fn the_message_is_the_message_of_the_wrapped_error() {
+        assert_eq!(
+            PipelineError::from(ValidationError::NotPng).to_string(),
+            ValidationError::NotPng.to_string()
+        );
+
+        for error in one_of_each() {
+            assert!(!error.to_string().is_empty());
+        }
+    }
+
+    /// Every variant chains to the error it wraps, so a front-end can print the
+    /// whole causal chain.
+    #[test]
+    fn every_variant_names_its_cause() {
+        for error in one_of_each() {
+            assert!(
+                std::error::Error::source(&error).is_some(),
+                "no cause behind: {error:?}"
+            );
+        }
+    }
+
+    /// The one failure no lower layer can report explains itself too.
+    #[test]
+    fn writing_failures_explain_themselves() {
+        assert!(OutputError::MalformedBuffer
+            .to_string()
+            .contains("dimensions"));
+        assert!(OutputError::EncodingFailed("disk full".to_owned())
+            .to_string()
+            .contains("disk full"));
+        assert!(std::error::Error::source(&OutputError::MalformedBuffer).is_none());
+    }
+}

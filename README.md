@@ -55,6 +55,13 @@ and see every changed pixel, which no embedding scheme survives.
 (SRNet, YeNet and the like) against the stego image alone, without access to the
 original cover, and without the password.
 
+> **Read [OPSEC.md](OPSEC.md) before using this for anything that matters.**
+> The guarantees above hold under conditions this tool cannot enforce for you,
+> and one of them is absolute: **never use the same image and the same password
+> for two different messages.** The key and the nonce are both derived from that
+> pair, so reusing it breaks the encryption outright. There is no warning and no
+> recovery.
+
 ## Installation
 
 ### CLI
@@ -76,32 +83,138 @@ cargo add stenoxide-core
 
 ## Usage
 
-Both subcommands read the password from the terminal with echo disabled. Neither
-the password nor the message is ever passed as an argument, so nothing sensitive
-reaches the shell history or the process table.
+`embed` and `extract` read the password from the terminal with echo disabled.
+Neither the password nor the message is ever passed as an argument, so nothing
+sensitive reaches the shell history or the process table. Both validate the
+container before asking for anything, so an unusable image is refused before you
+type a passphrase — and so is a payload path that cannot be read, or an output
+file that already exists.
+
+### Scan
+
+Whether a photo can be used as a container is not something you can tell by
+looking at it, so ask:
+
+```sh
+stenoxide scan ./photos
+```
+
+The path may be a file, a directory or a glob pattern, and defaults to the
+working directory. `--recursive` descends into subdirectories, `--all` also
+lists the images that were rejected and why, and `--json` writes a document a
+script can parse instead of a listing.
+
+```text
+Scanning ./photos ...
+
+  ✓ photos/landscape.png         3840x2160   ~74.2 KB payload
+  ✗ photos/portrait.jpg          UnsupportedFormat
+  ✗ photos/logo.png              ImageTooSmall 400x400
+
+  * Estimated payload capacity after encryption overhead
+  Summary: 1 valid, 2 invalid (3 scanned)
+```
+
+The capacity shown is what the container admits after encryption. The message is
+compressed first, so ordinary text usually fits at two or three times that
+figure.
+
+A recursive scan of a large folder shows a progress bar with a time estimate
+while it works. The estimate is measured in megapixels rather than in files,
+because that is what the analysis costs: a folder mixing snapshots with
+hundred-megapixel exports would otherwise sit at 90% and then take longer than
+the first 90% did. Progress is written to standard error and only when that is a
+terminal, so `--json` and redirected output are never touched by it.
 
 ### Embed
+
+The message is read from standard input, so it can be piped in:
 
 ```sh
 echo "secret message" | stenoxide embed --input photo.png --output stego.png
 ```
 
+Or typed, by running the command on its own. `embed` then says so and waits;
+finish the message with a line containing a single dot:
+
+```text
+$ stenoxide embed --input photo.png --output stego.png
+Password:
+Message to hide. It may span as many lines as you need.
+Finish with a line containing a single dot:  .
+Meet me at six.
+Bring the other half.
+.
+Read 38 bytes.
+```
+
+Typing it is the more private of the two: a message given to `echo` is a
+command line like any other and stays in the shell's history, while nothing
+typed here does. End of file — `Ctrl+D`, or `Ctrl+Z` then `Enter` on Windows —
+also ends the message, but the dot is what the prompt offers because
+PowerShell's line editor keeps `Ctrl+Z` for itself and never delivers it.
+
+The payload does not have to be text. It never did — what is hidden is bytes,
+and the pipeline has always compressed and encrypted whatever it was handed —
+so `--payload` names a file of any kind and reads it instead of standard input:
+
+```sh
+stenoxide embed --input photo.png --output stego.png --payload secret.zip
+```
+
+Capacity is what stops this from being as useful as it sounds. A 3000x3000
+container carries about 22 KB once encrypted, so a text file, a key, a small
+document or a short archive fit comfortably; a photograph, an installer or
+anything already compressed does not. Text shrinks a great deal before it is
+measured and binary data usually does not, which is why the refusal quotes the
+size of the *compressed* payload rather than the size of your file. Ask
+`stenoxide scan` what a container can carry before choosing one.
+
+When `--payload` is given, standard input is not read at all, and a path that
+does not exist, names a folder, or is empty is refused before the passphrase is
+asked for.
+
 ### Extract
 
 ```sh
 stenoxide extract --input stego.png
+stenoxide extract --input stego.png --payload-out secret.zip
 ```
 
-Extraction writes the recovered message to standard output as raw bytes, and
-reports every failure — wrong password, image carrying nothing, damaged payload
-— with the same sentence. Telling them apart is the oracle an attacker holding
-an intercepted image is looking for.
+Without `--payload-out`, extraction writes the recovered message to standard
+output as raw bytes. With it, the payload goes to the file instead, nothing is
+printed, and the exit code is the only thing to check.
+
+The path is yours to choose in full: nothing about the original file name is
+hidden with the payload, so the sender has no say in what lands on your disk.
+Only the extension is recovered, from the leading bytes of the content against
+a fixed table — so `--payload-out recovered` writes `recovered.zip` for an
+archive and `recovered.txt` for text, and a directory receives a file named
+`payload.<ext>` inside it. An extension you write yourself is always used
+exactly as written.
+
+An existing file is never overwritten; `--force` is what authorises it. Every
+other failure — wrong password, image carrying nothing, damaged payload, a disk
+that filled up mid-write — is reported with the same sentence. Telling them
+apart is the oracle an attacker holding an intercepted image is looking for.
 
 ## Requirements
 
-- PNG container image: minimum 2000x2000 pixels, with natural camera texture.
-- No prior JPEG compression on the container image. A PNG saved from a JPEG
-  still carries the 8x8 block grid and is refused.
+The container image has to satisfy four conditions, and `stenoxide scan` checks
+all of them for you. Each one exists for a reason, and none of them is a
+preference:
+
+| Requirement | Why |
+|-------------|-----|
+| **PNG**, or any lossless format | The payload lives in the least significant bits of the samples. A lossy codec rewrites exactly those, so a container saved as JPEG or WebP is a destroyed payload rather than a weakened one. |
+| **Never JPEG-compressed**, even if it is a PNG now | Decoding a JPEG and re-saving it as PNG keeps the pixels the codec produced, 8x8 block grid included. A steganalyst already knows the statistics of that grid, so anything added on top of it stands out against a signal they can model. |
+| **Between 2000x2000 and 128 megapixels** | The embedding rate is capped at 0.02 bits per pixel, and that cap is what keeps the changes invisible. Capacity is therefore a direct function of pixel count: four megapixels buy about 8 KB. Below the minimum there is no useful payload left to carry without raising the rate, and the rate is not negotiable. The upper bound is memory: the analysis costs about sixteen bytes per pixel at its peak, so a larger image is refused rather than left to exhaust the machine. |
+| **Natural texture**: foliage, fabric, stone, grass | A change can only hide where there is already detail to hide it in. Smooth regions — sky, walls, skin, plain backgrounds — offer nothing to hide behind, and an image that is smooth throughout also fails to hash reproducibly, which the key derivation depends on. |
+
+One more condition the tool cannot check: **the container must not exist
+anywhere else.** An adversary who finds the original subtracts the two images
+and sees every changed pixel at once. See [OPSEC.md](OPSEC.md), which explains
+each of these in full.
 
 ## Crates
 
@@ -109,6 +222,22 @@ an intercepted image is looking for.
 |-------|-------------|
 | [stenoxide-core](stenoxide-core/) | Core library: validation, cryptography, cost analysis and embedding |
 | [stenoxide-cli](stenoxide-cli/) | Command-line interface, installed as `stenoxide` |
+
+## Development
+
+```sh
+# Run the test suite
+cargo test --workspace
+
+# Run tests with coverage
+cargo llvm-cov --workspace --lcov --output-path lcov.info
+cargo llvm-cov report --html
+```
+
+Coverage is a merge requirement: the line coverage of the workspace must stay at
+or above 90%, and CI runs `cargo llvm-cov --workspace --fail-under-lines 90` on
+every pull request. `cargo llvm-cov` is installed with
+`cargo install cargo-llvm-cov --locked`.
 
 ## License
 

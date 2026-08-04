@@ -54,16 +54,25 @@ it goes.
 
 | Step | What it guarantees | `main` | `stable` |
 |------|--------------------|:------:|:--------:|
-| `cargo test --workspace` | The unit and integration suites pass. | yes | yes |
 | `cargo clippy --workspace -- -D warnings` | No lint warning survives. | yes | yes |
+| `cargo test --workspace` | The unit and integration suites pass. | no | yes |
+| `cargo llvm-cov --fail-under-lines 90` | Line coverage of the workspace stays at or above 90%. | no | yes |
 | `cargo audit` | No dependency carries a known advisory. | no | yes |
 | `cargo publish --workspace --dry-run` | Both crates package cleanly and would upload. | no | yes |
 
-The last two are release concerns, not correctness ones: an advisory or a
-packaging defect matters at the moment something is published, and running them
-on every feature branch costs a `cargo install cargo-audit` and a full package
-verification for no decision they could change. A pull request into `stable`
-runs them, and that is the merge that publishes.
+Only clippy runs on the way into `main`, and that is a budget decision. The
+suite, the coverage run and the `cargo install cargo-llvm-cov` that precedes it
+took roughly fifteen minutes of Actions time per pull request, against the 2,000
+free minutes a month the repository gets. Nothing is published from `main`, and
+every commit that reaches `stable` passes through this same job with all of it
+switched on, so the checks are not lost — they move to the merge where the
+answer decides something. Run `cargo test` locally while you work; treat a green
+`main` check as "it lints", not "it is proven".
+
+The last two are release concerns rather than correctness ones, and they are
+skipped on `main` for a second reason: an advisory or a packaging defect matters
+at the moment something is published. A pull request into `stable` runs them,
+and that is the merge that publishes.
 
 The publish check runs once for the whole workspace instead of once per crate.
 Packaging `stenoxide-cli` alone makes cargo look up `stenoxide-core` on
@@ -78,11 +87,11 @@ pull request does nothing). It performs, in order:
 
 1. **Version.** Computed from the commit subjects since the last tag.
 2. **Changelog.** A new section is prepended to `CHANGELOG.md`.
-3. **Commit and tag.** `chore: release vX.Y.Z [skip ci]`, pushed to `stable`,
-   then tag `vX.Y.Z`.
-4. **Build.** Three release binaries, in parallel, from the tag.
-5. **GitHub Release.** Created on the tag with the three binaries attached and
-   this version's changelog section as the body.
+3. **Commit.** `chore: release vX.Y.Z [skip ci]`, pushed to `stable`.
+4. **Build.** Three release binaries, in parallel, from that commit.
+5. **GitHub Release.** Created with the three binaries attached and this
+   version's changelog section as the body. **This is what creates the tag**,
+   on the release commit.
 6. **crates.io.** `cargo publish --workspace`, which orders the two crates by
    their dependency graph and waits for the registry to index `stenoxide-core`
    before uploading `stenoxide-cli`.
@@ -90,10 +99,29 @@ pull request does nothing). It performs, in order:
 Every stage depends on the previous one. A failure anywhere stops the rest, so
 a failed build never produces a half-populated release.
 
+### Why the tag is created last
+
+Nothing between steps 3 and 5 refers to `vX.Y.Z`; the build, the release and
+the publication all check out the release commit by its sha, which the release
+job hands down as an output.
+
+Tagging in step 3, as this used to, published the version number before there
+was anything to download under it. For as long as the three builds took, the
+repository carried a tag whose release did not exist — and when a build failed,
+it carried it permanently, with the number burnt: the next run recomputed the
+same version, found the tag, and stood down as though there were nothing to
+release. Creating the tag alongside the artefacts makes it mean what a reader
+assumes it means, and leaves a failed run's version free to be released again
+once the failure is fixed.
+
+That retry is why the changelog step replaces any section already written for
+the version being released instead of adding a second one.
+
 ## Versioning
 
 `scripts/changes.sh` lists the Conventional Commit changes since the last tag,
-oldest first, one per line, each classified as breaking, feat, fix or other.
+oldest first, one per line, each classified as breaking, feat, fix or other and
+carrying the hash and author of the commit it was read from.
 `scripts/next-version.sh` walks that list and applies one bump per change:
 
 | Change | Bump |
@@ -138,6 +166,43 @@ commit moves the version once.
 The changelog is built from the same list that produced the version, so the two
 can never disagree.
 
+### What a changelog entry looks like
+
+`scripts/changelog.sh` renders the list into the section that becomes both the
+`CHANGELOG.md` entry and the body of the GitHub Release:
+
+```markdown
+### Features
+- **cli**: read the payload from a file — [@ada](https://github.com/ada) ([`0794b7d`](…/commit/0794b7d…))
+- comprehensive test suite with 90% coverage requirement — [@ada](https://github.com/ada) ([`7738f65`](…))
+```
+
+Three things happen to a commit subject on the way in:
+
+- **The type is dropped.** It is already the heading the entry sits under.
+- **The scope is kept only when it names part of the program.** A scope
+  matching `prompt`, `prompt-9`, `prompt-12` and so on is dropped: it records
+  which step of the process produced the change, which means something to
+  whoever ran the work and nothing to whoever is reading the release.
+- **The commit is attributed and linked.** The GitHub handle, linked to its
+  profile, then the abbreviated hash linking to the commit. A line contributed
+  by a squash carries the hash and author of the squash itself — the commits it
+  replaced are not on the branch, so a link to one would resolve to nothing.
+
+#### Why the handle and not the name in the commit
+
+`user.name` is whatever the machine that made the commit had configured. It
+identifies nobody in particular, it links nowhere, and one person can appear
+under two spellings in a single release. The handle is an account: it resolves
+to a profile, and it is the name the same person is called by everywhere else in
+the project.
+
+It costs one `gh api repos/…/commits/{sha}` per commit, cached by sha so a
+squash of twenty commits makes one request rather than twenty, and the release
+job passes `GITHUB_TOKEN` for it. The lookup is never fatal: an unlinked email
+address, a missing token or no network leaves the entry crediting the name
+recorded in the commit, and the release still goes out.
+
 ### Overriding the version by hand
 
 The calculated version never lowers a deliberate one. If the version in the
@@ -171,7 +236,7 @@ case where the dependency requirement is most likely to have been forgotten.
 | Secret | Used by | Purpose |
 |--------|---------|---------|
 | `CRATES_IO_TOKEN` | `release.yml` | Publishing both crates to crates.io. |
-| `GITHUB_TOKEN` | `release.yml` | Pushing the release commit, the tag and the GitHub Release. Provided automatically. |
+| `GITHUB_TOKEN` | `release.yml` | Pushing the release commit, and creating the tag and the GitHub Release. Provided automatically. |
 
 `CRATES_IO_TOKEN` must be created on crates.io with publish scope for
 `stenoxide-core` and `stenoxide-cli`, then added under
@@ -179,21 +244,90 @@ case where the dependency requirement is most likely to have been forgotten.
 
 ## Branch protection
 
-Both branches must be protected or the gate is decorative. Under
-*Settings → Branches → Add branch protection rule*, once for `main` and once
-for `stable`:
+Both branches are gated by a ruleset kept in this repository, under
+[`.github/rulesets/`](../rulesets/), and applied with:
 
-- Require a pull request before merging.
-- Require status checks to pass before merging.
-- Require branches to be up to date before merging.
-- Required status check: **Test and validate**.
+```sh
+gh api --method POST repos/OWNER/REPO/rulesets --input .github/rulesets/NAME.json
+```
 
-The check is named identically on both branches, so the same rule text applies;
-what differs is which steps run inside it.
+To update an existing ruleset, `PUT` to `…/rulesets/{id}` with the same file;
+`gh api repos/OWNER/REPO/rulesets` lists the ids. Verify what is live with:
 
-Do not enable "Include administrators" for pushes on `stable`: the release job
-pushes the version commit and the tag back to the branch using `GITHUB_TOKEN`,
-and a rule that blocks it will break every release.
+```sh
+gh api repos/OWNER/REPO/rules/branches/NAME
+```
+
+### `stable`
+
+`stable` publishes, so the gate in front of it is the one that has to hold: a
+merge into it uploads binaries to a GitHub Release and two crates to crates.io,
+neither of which can be taken back.
+[`.github/rulesets/stable.json`](../rulesets/stable.json) enforces:
+
+| Rule | Why |
+|------|-----|
+| Pull request required, squash only | Nothing reaches the published line without a merge that the release job can read. |
+| **Test and validate** must pass | Clippy, the tests, the coverage floor, `cargo audit` and the packaging dry run — the full job, which only a `stable` target gets. |
+| **Pull request title** must pass | The title is the fallback subject a squash lands with. |
+| Branch must be up to date | The checks ran against what will actually be on `stable`. |
+| No force push, no deletion | The tags and the published history stay where they are. |
+
+Approvals are not required. A repository this size would only be gating on its
+own author, and a rule that has to be bypassed on every merge protects nothing.
+The checks are what the rule is for.
+
+#### The one bypass
+
+GitHub Actions is a bypass actor, and has to be. The release job pushes the
+version commit to `stable` with `GITHUB_TOKEN`, and every rule above applies to
+direct pushes as much as to merges — without the bypass the first release would
+fail on its own protection.
+
+This is why the rules are a ruleset rather than a classic branch protection
+rule: classic protection can exempt administrators, which is both broader than
+needed and does not cover a bot, while a ruleset can name GitHub Actions
+specifically and leave everyone else fully gated.
+
+### `main`
+
+`main` collects work and publishes nothing, and everything on it is re-checked
+in full by the pull request that promotes it to `stable`. What it still owes is
+that nothing lands red: a pull request into `main` cannot be merged until both
+checks are green. [`.github/rulesets/main.json`](../rulesets/main.json)
+enforces:
+
+| Rule | Why |
+|------|-----|
+| **Test and validate** must pass | Clippy. The tests, the coverage floor and the release steps are all skipped for a `main` target, so this gate says the branch lints — the proof arrives at the promotion to `stable`. |
+| **Pull request title** must pass | The title is the fallback subject a squash lands with, and what the next promotion to `stable` reads. |
+| No force push, no deletion | The history a merged pull request was checked against stays where it is. |
+
+No pull request is required, and the branch is not required to be up to date.
+Both are deliberate: a direct push is still allowed (see below), and forcing a
+rebase whenever something else lands first buys nothing on a branch whose
+content is verified again on the way to `stable`.
+
+#### Why an owner can still push straight to `main`
+
+The two are not separable as cleanly as they look. A required status check is
+evaluated against whatever updates the ref, so the rule that blocks a red merge
+blocks a direct push too — a freshly written commit carries no checks at all,
+and the push is refused outright:
+
+```
+remote: - 2 of 2 required status checks are expected.
+```
+
+No rule mode distinguishes the two cases. The API's `bypass_mode` offers
+`pull_request`, which exempts an actor *on pull requests only* — precisely the
+wrong way round — and `always`. So organisation owners are exempt `always`, and
+the asymmetry is one of friction rather than of rule: a direct push goes
+through and is recorded as a bypass, while on a pull request the merge box
+shows the gate and getting past a red check takes a deliberate bypass instead
+of the ordinary merge button.
+
+For everyone else — collaborators, forks, Dependabot — the gate is absolute.
 
 ## Platforms built
 
@@ -203,6 +337,6 @@ and a rule that blocks it will break every release.
 | `x86_64-pc-windows-msvc` | `windows-latest` | `stenoxide-windows-x86_64.exe` |
 | `aarch64-apple-darwin` | `macos-latest` | `stenoxide-macos-arm64` |
 
-All three are built with `cargo build --release` from the release tag, so the
-binaries attached to a GitHub Release are exactly the source that was tagged
-and published.
+All three are built with `cargo build --release` from the release commit — the
+same commit the tag is put on once they succeed — so the binaries attached to a
+GitHub Release are exactly the source that was tagged and published.

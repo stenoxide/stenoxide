@@ -3,6 +3,11 @@ prompts/
 *.env
 LIBSDC_PATH
 
+# Coverage artifacts. Both are produced by `cargo llvm-cov`, which the CI merge
+# gate runs; neither is worth versioning.
+lcov.info
+coverage/
+
 # Test fixtures are generated on demand by the integration suite, never
 # committed. See stenoxide-core/tests/support/mod.rs.
 stenoxide-core/tests/fixtures/

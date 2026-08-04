@@ -17,6 +17,7 @@ jobs:
     outputs:
       next_version: ${{ steps.version.outputs.next }}
       release: ${{ steps.version.outputs.release }}
+      sha: ${{ steps.commit.outputs.sha }}
 
     steps:
       # `ref: stable` rather than the default: on a closed pull_request the
@@ -104,52 +105,57 @@ jobs:
 
       - name: Generate changelog
         if: steps.version.outputs.release == 'true'
+        # Read by `gh` inside changelog.sh, which asks the API which account is
+        # behind each commit so the entry can credit it by handle. Without a
+        # token the lookup fails quietly and the entries fall back to the name
+        # recorded in the commit.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=${{ steps.version.outputs.next }}
-          DATE=$(date +%Y-%m-%d)
           LAST_TAG=${{ steps.version.outputs.last_tag }}
 
           if [ "$LAST_TAG" = "none" ]; then
-            CHANGES=$(bash .github/scripts/changes.sh)
+            RANGE=
           else
-            CHANGES=$(bash .github/scripts/changes.sh "${LAST_TAG}..HEAD")
+            RANGE="${LAST_TAG}..HEAD"
           fi
 
           # The same list that decided the version decides the sections, so the
           # changelog can never disagree with the number on the tag.
-          section() { awk -F'\t' -v kind="$1" '$1 == kind { print "- " $2 }' <<<"$CHANGES"; }
-
-          BREAKING=$(section breaking)
-          FEATURES=$(section feat)
-          FIXES=$(section fix)
-          OTHER=$(section other)
-          DEPS=$(section deps)
-
-          {
-            echo "## [$VERSION] - $DATE"
-            [ -n "$BREAKING" ] && printf '\n### Breaking Changes\n%s\n' "$BREAKING"
-            [ -n "$FEATURES" ] && printf '\n### Features\n%s\n' "$FEATURES"
-            [ -n "$FIXES" ]    && printf '\n### Bug Fixes\n%s\n' "$FIXES"
-            [ -n "$OTHER" ]    && printf '\n### Other Changes\n%s\n' "$OTHER"
-            [ -n "$DEPS" ]     && printf '\n### Dependencies\n%s\n' "$DEPS"
-            echo
-          } > .changelog-entry
+          bash .github/scripts/changes.sh $RANGE \
+            | bash .github/scripts/changelog.sh \
+                "${{ steps.version.outputs.next }}" \
+                "${{ github.server_url }}/${{ github.repository }}" \
+            > .changelog-entry
 
           # Rebuilt rather than prepended to: the new section belongs under the
           # document title, not above it.
+          #
+          # Any section already written for this version is dropped as the rest
+          # is carried over, so the freshly rendered one replaces it instead of
+          # joining it. That happens when a release commit landed but the run
+          # that followed it did not finish — the tag is only created at the very
+          # end, so nothing stops the same version being attempted again.
           {
             echo "# Changelog"
             echo
             cat .changelog-entry
             if [ -f CHANGELOG.md ]; then
-              awk 'found || index($0, "## [") == 1 { found = 1; print }' CHANGELOG.md
+              awk -v hdr="## [${{ steps.version.outputs.next }}]" '
+                index($0, "## [") == 1 { skip = index($0, hdr) == 1; found = 1 }
+                found && !skip        { print }
+              ' CHANGELOG.md
             fi
           } > CHANGELOG.next
 
           mv CHANGELOG.next CHANGELOG.md
           rm .changelog-entry
 
+      # No tag is pushed here. Everything downstream builds from this commit by
+      # its sha, and the tag is created by the GitHub Release at the end of the
+      # run — see "Create GitHub Release" below.
       - name: Commit version bump and changelog
+        id: commit
         if: steps.version.outputs.release == 'true'
         run: |
           git config user.name "github-actions[bot]"
@@ -157,12 +163,7 @@ jobs:
           git add Cargo.toml Cargo.lock stenoxide-cli/Cargo.toml CHANGELOG.md
           git diff --staged --quiet || git commit -m "chore: release v${{ steps.version.outputs.next }} [skip ci]"
           git push origin HEAD:stable
-
-      - name: Create tag
-        if: steps.version.outputs.release == 'true'
-        run: |
-          git tag v${{ steps.version.outputs.next }}
-          git push origin v${{ steps.version.outputs.next }}
+          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
   build:
     name: Build ${{ matrix.target }}
@@ -188,9 +189,11 @@ jobs:
             asset: stenoxide-macos-arm64
 
     steps:
+      # The release commit by sha rather than by tag: the tag does not exist
+      # yet, and this is the commit it will end up pointing at.
       - uses: actions/checkout@v4
         with:
-          ref: v${{ needs.release.outputs.next_version }}
+          ref: ${{ needs.release.outputs.sha }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -230,11 +233,11 @@ jobs:
       contents: write
 
     steps:
-      # The tag, not the merge ref: the changelog this job quotes was written
-      # by the release job and only exists from that commit onwards.
+      # The release commit, not the merge ref: the changelog this job quotes was
+      # written by the release job and only exists from that commit onwards.
       - uses: actions/checkout@v4
         with:
-          ref: v${{ needs.release.outputs.next_version }}
+          ref: ${{ needs.release.outputs.sha }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -251,10 +254,18 @@ jobs:
             found                           { print }
           ' CHANGELOG.md > release-notes.md
 
+      # This is where the tag is created, on the release commit, in the same
+      # call that attaches the binaries. Tagging earlier — in the release job,
+      # before anything had been built — published a version number that pointed
+      # at no downloadable release for as long as the builds took, and left one
+      # behind for good whenever a build failed. A tag now appears only once
+      # there is a release under it, and a failed build leaves the version
+      # untagged and free to be released again.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.release.outputs.next_version }}
+          target_commitish: ${{ needs.release.outputs.sha }}
           name: stenoxide v${{ needs.release.outputs.next_version }}
           body_path: release-notes.md
           files: artifacts/**/*
@@ -270,7 +281,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: v${{ needs.release.outputs.next_version }}
+          ref: ${{ needs.release.outputs.sha }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable

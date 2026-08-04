@@ -251,3 +251,173 @@ pub fn decrypt_and_decompress(
     drop(compressed);
     Ok(plaintext)
 }
+
+#[cfg(test)]
+mod tests {
+    // The crate-wide bans on panicking helpers reach into `cfg(test)` code as
+    // well. A test that cannot panic cannot fail, so they are lifted here and
+    // only here.
+    #![allow(clippy::expect_used)]
+    #![allow(clippy::panic)]
+
+    use super::*;
+
+    /// The key the tests encrypt under.
+    const KEY: [u8; 32] = [0x2Bu8; 32];
+
+    /// The nonce the tests encrypt under.
+    const NONCE: [u8; 24] = [0x7Fu8; 24];
+
+    /// A payload with enough structure for compression to have work to do.
+    fn plaintext() -> Vec<u8> {
+        b"the same sentence, over and over. ".repeat(32)
+    }
+
+    /// The primitive on its own: what goes in comes out, tag included.
+    #[test]
+    fn the_cipher_round_trips_its_own_output() {
+        let cipher = XChaCha20Poly1305Cipher::new();
+        let message = b"a message";
+
+        let sealed = cipher
+            .encrypt(&KEY, &NONCE, message, b"aad")
+            .expect("encryption must succeed");
+
+        // The 16-byte Poly1305 tag rides at the end of the ciphertext, so the
+        // sealed form is exactly that much longer than the message.
+        assert_eq!(sealed.len(), message.len() + 16);
+
+        let opened = cipher
+            .decrypt(&KEY, &NONCE, &sealed, b"aad")
+            .expect("decryption must succeed");
+
+        assert_eq!(opened.as_slice(), message.as_slice());
+    }
+
+    /// A wrong key, a wrong nonce, wrong associated data and a damaged tag all
+    /// produce the same answer.
+    ///
+    /// Collapsing them is the point: a caller that could tell them apart would
+    /// hold an oracle saying *why* a guess was rejected.
+    #[test]
+    fn every_way_of_being_wrong_looks_the_same() {
+        let cipher = XChaCha20Poly1305Cipher::new();
+        let sealed = cipher
+            .encrypt(&KEY, &NONCE, b"a message", STENOXIDE_AAD)
+            .expect("encryption must succeed");
+
+        let mut damaged = sealed.to_vec();
+        damaged[0] ^= 0x40;
+
+        let attempts = [
+            cipher.decrypt(&[0u8; 32], &NONCE, &sealed, STENOXIDE_AAD),
+            cipher.decrypt(&KEY, &[0u8; 24], &sealed, STENOXIDE_AAD),
+            cipher.decrypt(&KEY, &NONCE, &sealed, b"other-construction"),
+            cipher.decrypt(&KEY, &NONCE, &damaged, STENOXIDE_AAD),
+            cipher.decrypt(&KEY, &NONCE, &sealed[..4], STENOXIDE_AAD),
+        ];
+
+        for attempt in attempts {
+            match attempt.map(|_| ()) {
+                Err(AEADError::AuthenticationFailed) => {}
+                Err(other) => panic!("expected an authentication failure, got: {other:?}"),
+                Ok(()) => panic!("a wrong input must not authenticate"),
+            }
+        }
+    }
+
+    /// Compression happens first, which is the only order that saves anything.
+    #[test]
+    fn the_payload_is_compressed_before_it_is_encrypted() {
+        let cipher = XChaCha20Poly1305Cipher::new();
+        let plaintext = plaintext();
+
+        let ciphertext = compress_and_encrypt(&plaintext, &KEY, &NONCE, &cipher)
+            .expect("compression and encryption must succeed");
+
+        assert!(
+            ciphertext.len() < plaintext.len(),
+            "a repetitive payload must shrink: {} against {}",
+            ciphertext.len(),
+            plaintext.len()
+        );
+
+        let recovered = decrypt_and_decompress(&ciphertext, &KEY, &NONCE, &cipher)
+            .expect("decryption and decompression must succeed");
+
+        assert_eq!(recovered.as_slice(), plaintext.as_slice());
+    }
+
+    /// Nothing reaches the Zstandard decoder that the tag has not vouched for.
+    #[test]
+    fn authentication_runs_before_decompression() {
+        let cipher = XChaCha20Poly1305Cipher::new();
+        let ciphertext = compress_and_encrypt(&plaintext(), &KEY, &NONCE, &cipher)
+            .expect("compression and encryption must succeed");
+
+        let error = decrypt_and_decompress(&ciphertext, &[9u8; 32], &NONCE, &cipher)
+            .map(|_| ())
+            .expect_err("a wrong key must not authenticate");
+
+        assert!(
+            matches!(
+                error,
+                CryptoError::AEADError(AEADError::AuthenticationFailed)
+            ),
+            "got: {error:?}"
+        );
+    }
+
+    /// A payload that authenticates but is not a Zstandard frame is a genuinely
+    /// broken payload, and is reported as one.
+    ///
+    /// The one failure the extraction path must *not* retry under another salt:
+    /// the tag has already said the key was right.
+    #[test]
+    fn a_verified_payload_that_will_not_decompress_is_a_decompression_failure() {
+        let cipher = XChaCha20Poly1305Cipher::new();
+        let sealed = cipher
+            .encrypt(&KEY, &NONCE, b"not a zstandard frame", STENOXIDE_AAD)
+            .expect("encryption must succeed");
+
+        let error = decrypt_and_decompress(&sealed, &KEY, &NONCE, &cipher)
+            .map(|_| ())
+            .expect_err("authenticated nonsense must not decompress");
+
+        assert!(
+            matches!(error, CryptoError::DecompressionError(_)),
+            "got: {error:?}"
+        );
+    }
+
+    /// Every failure explains itself, and the chain of causes is wired.
+    #[test]
+    fn every_failure_explains_itself() {
+        assert!(AEADError::AuthenticationFailed
+            .to_string()
+            .contains("corrupted"));
+        assert!(AEADError::CipherError("no key".to_owned())
+            .to_string()
+            .contains("no key"));
+
+        assert!(CryptoError::CompressionError("level".to_owned())
+            .to_string()
+            .contains("level"));
+        assert!(CryptoError::DecompressionError("truncated".to_owned())
+            .to_string()
+            .contains("truncated"));
+
+        // The AEAD variant delegates rather than prefixing, so the sentence the
+        // user sees is the one the primitive wrote.
+        let wrapped = CryptoError::from(AEADError::AuthenticationFailed);
+        assert_eq!(
+            wrapped.to_string(),
+            AEADError::AuthenticationFailed.to_string()
+        );
+
+        assert!(std::error::Error::source(&wrapped).is_some());
+        assert!(
+            std::error::Error::source(&CryptoError::CompressionError("x".to_owned())).is_none()
+        );
+    }
+}

@@ -145,3 +145,65 @@ impl Zeroize for ImageBuffer {
         self.pixels.zeroize();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every layout, with the stride it promises.
+    const LAYOUTS: [(ColorSpace, usize); 4] = [
+        (ColorSpace::Rgb8, 3),
+        (ColorSpace::Rgb16, 6),
+        (ColorSpace::Rgba8, 4),
+        (ColorSpace::Luma8, 1),
+    ];
+
+    /// The stride of each layout, which the length contract of
+    /// [`CoverSource::pixels`] is expressed in.
+    #[test]
+    fn each_layout_reports_its_own_stride() {
+        for (layout, stride) in LAYOUTS {
+            assert_eq!(layout.bytes_per_pixel(), stride, "layout {layout:?}");
+        }
+    }
+
+    /// Only the colour layouts have a red plane for the cost layer to protect.
+    #[test]
+    fn only_colour_layouts_carry_a_red_channel() {
+        for (layout, _) in LAYOUTS {
+            assert_eq!(
+                layout.has_explicit_red_channel(),
+                layout != ColorSpace::Luma8,
+                "layout {layout:?}"
+            );
+        }
+    }
+
+    /// The two provided methods of the trait, which no implementor overrides.
+    #[test]
+    fn offsets_follow_row_major_order() {
+        let image = ImageBuffer::new(vec![0u8; 6 * 4 * 3], 6, 4, ColorSpace::Rgb8);
+
+        assert_eq!(image.dimensions(), (6, 4));
+        assert_eq!(image.pixel_count(), 24);
+        assert_eq!(image.pixel_offset(0, 0), 0);
+        assert_eq!(image.pixel_offset(1, 0), 3);
+        // One row down and one column across: six pixels of stride, plus one.
+        assert_eq!(image.pixel_offset(1, 1), 21);
+    }
+
+    /// Wiping a buffer clears the samples and leaves the geometry readable.
+    #[test]
+    fn zeroizing_clears_the_samples_and_keeps_the_geometry() {
+        let mut image = ImageBuffer::new(vec![0xAAu8; 12], 4, 3, ColorSpace::Luma8);
+
+        image.pixels_mut()[0] = 0xFF;
+        assert!(image.pixels().iter().any(|&sample| sample != 0));
+
+        image.zeroize();
+
+        assert!(image.pixels().iter().all(|&sample| sample == 0));
+        assert_eq!(image.dimensions(), (4, 3));
+        assert_eq!(image.color_space(), ColorSpace::Luma8);
+    }
+}

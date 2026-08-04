@@ -1,8 +1,8 @@
 name: CI
 
 # Both branches are gated by the same job. `main` collects work and gets the
-# correctness checks; `stable` publishes, so it additionally has to prove the
-# dependency tree is clean and that both crates still package.
+# cheap lint pass; `stable` publishes, so it runs the full suite: the tests, the
+# coverage floor, a clean dependency tree and a packaging rehearsal.
 on:
   pull_request:
     branches: [main, stable]
@@ -20,7 +20,12 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          # `llvm-tools-preview` carries the profiling runtime and the
+          # `llvm-profdata`/`llvm-cov` binaries the coverage step shells out to.
+          # Without it that step fails on a missing tool rather than on the
+          # figure it is there to check. It is only pulled in where coverage
+          # actually runs, so a `main` pull request does not pay for it.
+          components: ${{ github.base_ref == 'stable' && 'clippy, llvm-tools-preview' || 'clippy' }}
 
       - name: Cache dependencies
         uses: actions/cache@v4
@@ -31,11 +36,30 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: cargo test
-        run: cargo test --workspace
-
       - name: cargo clippy
         run: cargo clippy --workspace -- -D warnings
+
+      # The suite and the coverage floor are the expensive half of this job:
+      # together with the `cargo install` below they were most of the fifteen
+      # minutes every `main` pull request spent, against a 2,000 minute monthly
+      # budget. Nothing is published from `main`, and no commit reaches `stable`
+      # without passing through this same job with them switched on, so running
+      # them on each feature branch buys an earlier signal at a price the free
+      # tier cannot carry. Run them locally while working; CI proves them at the
+      # release merge.
+      - name: cargo test
+        if: github.base_ref == 'stable'
+        run: cargo test --workspace
+
+      - name: Install cargo-llvm-cov
+        if: github.base_ref == 'stable'
+        run: cargo install cargo-llvm-cov --locked
+
+      # A merge gate, not a report: a pull request that drops line coverage of
+      # the workspace below 90% fails here and does not land.
+      - name: Check coverage
+        if: github.base_ref == 'stable'
+        run: cargo llvm-cov --workspace --fail-under-lines 90
 
       - name: Install cargo-audit
         if: github.base_ref == 'stable'

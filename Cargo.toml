@@ -5,7 +5,7 @@ members = ["stenoxide-core", "stenoxide-cli"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/stenoxide/stenoxide"
 homepage = "https://github.com/stenoxide/stenoxide"
@@ -14,8 +14,19 @@ homepage = "https://github.com/stenoxide/stenoxide"
 # dev-dependency that arranges it is a path dependency on this same package,
 # which publishing strips. Shipping tests that cannot compile is worse than
 # shipping none. `scripts` holds the steganalysis harness, which needs a Python
-# toolkit that is not part of the crate.
-exclude = ["tests/*", "scripts/*"]
+# toolkit that is not part of the crate. `examples` holds research harnesses
+# that reach into `test_support` for the same reason the tests do, and are of
+# no use to anyone consuming the library.
+exclude = ["tests/*", "scripts/*", "examples/*"]
+
+# Coverage runs the test profile with instrumentation, and instrumentation is
+# per-codegen-unit: with the default parallel split a line can be attributed to
+# whichever unit inlined it, which shows up as a coverage figure that moves
+# between machines. One unit is slower to build and reports the same numbers
+# everywhere, which is what a merge gate needs.
+[profile.coverage]
+inherits = "test"
+codegen-units = 1
 
 [workspace.dependencies]
 image = "0.25"
@@ -39,3 +50,8 @@ cc = "1.4"
 clap = { version = "4.6", features = ["derive"] }
 rpassword = "7.5"
 tempfile = "3.27"
+static_assertions = "1.1"
+# Requires rustc 1.85, which is what sets `rust-version` above. Staying on
+# 0.18.4 would have kept the older minimum; the newer release was taken
+# deliberately and the minimum raised to match.
+indicatif = "0.18.6"

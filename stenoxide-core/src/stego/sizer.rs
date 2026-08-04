@@ -232,3 +232,142 @@ pub fn validate_payload_fits(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    // The crate-wide bans on panicking helpers reach into `cfg(test)` code as
+    // well. A test that cannot panic cannot fail, so they are lifted here and
+    // only here.
+    #![allow(clippy::expect_used)]
+    #![allow(clippy::panic)]
+
+    use super::*;
+
+    use crate::image_io::buffer::{ColorSpace, CoverSource, ImageBuffer};
+
+    /// Side length of the synthetic containers below, in pixels.
+    const SIDE: u32 = 200;
+
+    /// A container of [`SIDE`] squared pixels. Only its geometry matters here.
+    fn image() -> ImageBuffer {
+        ImageBuffer::new(
+            vec![0u8; (SIDE * SIDE) as usize],
+            SIDE,
+            SIDE,
+            ColorSpace::Luma8,
+        )
+    }
+
+    /// A map in which `usable` positions carry a positive cost and the rest are
+    /// marked untouchable.
+    fn map(image: &ImageBuffer, usable: usize) -> CostMap<'_> {
+        let costs = (0..image.pixel_count())
+            .map(|index| if index < usable { 1.0 } else { 0.0 })
+            .collect();
+
+        CostMap::new(image, costs)
+    }
+
+    /// Capacity is whittled down by the ceiling, the coder and the tag, in that
+    /// order, and the report says which step took what.
+    #[test]
+    fn capacity_is_reported_step_by_step() {
+        let image = image();
+        let map = map(&image, image.pixel_count());
+        let report = compute_capacity(&map, EmbeddingMode::Symmetric);
+
+        assert_eq!(report.total_pixels(), image.pixel_count());
+        assert_eq!(report.textured_pixels(), image.pixel_count());
+        assert_eq!(
+            report.gross_capacity_bits(),
+            (image.pixel_count() as f32 * MAX_BPP) as usize
+        );
+        assert_eq!(
+            report.net_capacity_bits(),
+            (report.gross_capacity_bits() as f32 * STC_EFFICIENCY) as usize
+        );
+        assert_eq!(report.mac_overhead_bytes(), MAC_OVERHEAD_BYTES);
+        assert_eq!(
+            report.available_bytes(),
+            report.net_capacity_bits() / BITS_PER_BYTE - MAC_OVERHEAD_BYTES
+        );
+    }
+
+    /// Only positions with a strictly positive cost count towards capacity.
+    #[test]
+    fn positions_of_zero_cost_carry_nothing() {
+        let image = image();
+        let half = image.pixel_count() / 2;
+
+        let full = compute_capacity(&map(&image, image.pixel_count()), EmbeddingMode::Symmetric);
+        let halved = compute_capacity(&map(&image, half), EmbeddingMode::Symmetric);
+
+        assert_eq!(halved.textured_pixels(), half);
+        assert_eq!(halved.total_pixels(), full.total_pixels());
+        assert!(halved.available_bytes() < full.available_bytes());
+    }
+
+    /// A container too small to pay for its own tag has no room at all, and
+    /// says so rather than wrapping into an enormous capacity.
+    #[test]
+    fn a_container_that_cannot_pay_the_tag_admits_nothing() {
+        let tiny = ImageBuffer::new(vec![0u8; 64], 8, 8, ColorSpace::Luma8);
+        let report = compute_capacity(&map(&tiny, tiny.pixel_count()), EmbeddingMode::Symmetric);
+
+        assert_eq!(report.available_bytes(), 0);
+    }
+
+    /// Nothing is spent on key transport when both sides derive the key.
+    #[test]
+    fn the_symmetric_mode_transports_no_key() {
+        assert_eq!(EmbeddingMode::default(), EmbeddingMode::Symmetric);
+        assert_eq!(EmbeddingMode::Symmetric.key_transport_overhead_bytes(), 0);
+    }
+
+    /// The exact boundary: the last payload that fits, and the first that does
+    /// not.
+    #[test]
+    fn the_last_byte_that_fits_is_accepted_and_the_next_is_not() {
+        let image = image();
+        let report = compute_capacity(&map(&image, image.pixel_count()), EmbeddingMode::Symmetric);
+        let available = report.available_bytes();
+
+        assert!(available > 0, "the fixture must have room to measure");
+        assert!(validate_payload_fits(available, &report).is_ok());
+        assert!(validate_payload_fits(available - 1, &report).is_ok());
+
+        match validate_payload_fits(available + 1, &report) {
+            Err(SizerError::PayloadTooLarge {
+                payload,
+                available: reported,
+                deficit,
+            }) => {
+                assert_eq!(payload, available + 1);
+                assert_eq!(reported, available);
+                assert_eq!(deficit, 1);
+            }
+            Ok(()) => panic!("one byte over the limit must be refused"),
+        }
+    }
+
+    /// The refusal tells the user what to do and nothing about the container.
+    #[test]
+    fn the_refusal_leaks_no_parameter() {
+        let message = SizerError::PayloadTooLarge {
+            payload: 4_242,
+            available: 1_337,
+            deficit: 2_905,
+        }
+        .to_string();
+
+        assert!(message.contains("shorten the message"));
+        for leak in [
+            "4242", "1337", "2905", "bpp", "0.02", "byte", "capacity", "pixel",
+        ] {
+            assert!(
+                !message.contains(leak),
+                "the message must not expose {leak:?}: {message}"
+            );
+        }
+    }
+}

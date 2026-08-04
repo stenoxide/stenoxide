@@ -189,7 +189,11 @@ mod tests {
 
         assert_eq!(permutation.len(), POSITIONS);
         assert_eq!(
-            permutation.iter().copied().collect::<HashSet<usize>>().len(),
+            permutation
+                .iter()
+                .copied()
+                .collect::<HashSet<usize>>()
+                .len(),
             POSITIONS
         );
         assert!(permutation.iter().all(|&index| index < POSITIONS));
@@ -230,7 +234,10 @@ mod tests {
             .filter(|(index, &value)| *index == value)
             .count();
 
-        assert!(fixed < POSITIONS / 100, "{fixed} positions were left in place");
+        assert!(
+            fixed < POSITIONS / 100,
+            "{fixed} positions were left in place"
+        );
     }
 
     /// Degenerate lengths are the identity, and consume no keystream.

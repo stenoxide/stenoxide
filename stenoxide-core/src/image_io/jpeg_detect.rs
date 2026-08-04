@@ -424,13 +424,16 @@ mod tests {
     /// exists to find: every step it shows sits on a grid line.
     #[test]
     fn tiled_content_is_reported_as_blocking() {
-        let tiled = image_from(SIDE, |x, y| {
-            if (x / 8 + y / 8) % 2 == 0 {
-                100
-            } else {
-                160
-            }
-        });
+        let tiled = image_from(
+            SIDE,
+            |x, y| {
+                if (x / 8 + y / 8) % 2 == 0 {
+                    100
+                } else {
+                    160
+                }
+            },
+        );
 
         match detect_jpeg_artifacts(&tiled, SIDE, SIDE, ColorSpace::Luma8) {
             Some(ratio) => assert!(ratio > ARTIFACT_THRESHOLD, "ratio was {ratio}"),
@@ -443,10 +446,7 @@ mod tests {
     #[test]
     fn there_is_no_verdict_without_a_complete_block() {
         // No pixels at all.
-        assert_eq!(
-            detect_jpeg_artifacts(&[], 0, 0, ColorSpace::Rgb8),
-            None
-        );
+        assert_eq!(detect_jpeg_artifacts(&[], 0, 0, ColorSpace::Rgb8), None);
 
         // A buffer shorter than the geometry it claims.
         assert_eq!(

@@ -292,7 +292,11 @@ mod tests {
         // Cleared afterwards, so the report that follows is not preceded by a
         // finished bar nobody needs to read.
         progress.finish();
-        assert!(terminal.contents().is_empty(), "got: {}", terminal.contents());
+        assert!(
+            terminal.contents().is_empty(),
+            "got: {}",
+            terminal.contents()
+        );
     }
 
     /// Work is measured in the unit the cost is proportional to.
@@ -322,7 +326,11 @@ mod tests {
 
         progress.advance(100);
         progress.redraw();
-        assert!(terminal.contents().contains("100%"), "got: {}", terminal.contents());
+        assert!(
+            terminal.contents().contains("100%"),
+            "got: {}",
+            terminal.contents()
+        );
     }
 
     /// The label of the extraction indicator says nothing about a stage.
@@ -334,8 +342,16 @@ mod tests {
     #[test]
     fn the_activity_label_names_no_stage() {
         let forbidden = [
-            "decrypt", "password", "key", "salt", "hypothesis", "payload", "header", "extract",
-            "authenticat", "verify",
+            "decrypt",
+            "password",
+            "key",
+            "salt",
+            "hypothesis",
+            "payload",
+            "header",
+            "extract",
+            "authenticat",
+            "verify",
         ];
 
         let label = WORKING_LABEL.to_lowercase();

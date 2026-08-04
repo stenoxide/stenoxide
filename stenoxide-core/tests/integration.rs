@@ -62,7 +62,7 @@ use stenoxide_core::pipeline::{EmbedPipeline, PipelineError};
 use stenoxide_core::stego::sizer::{compute_capacity, EmbeddingMode, SizerError};
 use stenoxide_core::stego::stc::StcConfig;
 use tempfile::NamedTempFile;
-use zeroize::{Zeroizing, ZeroizeOnDrop};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// The message the round trip carries.
 const MESSAGE: &[u8] = "Top secret test message".as_bytes();
@@ -244,7 +244,10 @@ fn oversized_payload_is_refused_without_leaking_parameters() {
         .expect_err("a payload far larger than the container must be refused");
 
     assert!(
-        matches!(error, PipelineError::Sizer(SizerError::PayloadTooLarge { .. })),
+        matches!(
+            error,
+            PipelineError::Sizer(SizerError::PayloadTooLarge { .. })
+        ),
         "expected a capacity refusal, got: {error:?}"
     );
 
@@ -460,7 +463,10 @@ fn a_perceptually_unstable_container_is_refused() {
 
     match error {
         PipelineError::PHash(PHashError::InsufficientStability { unstable_bits, .. }) => {
-            assert!(unstable_bits > 1, "only {unstable_bits} bits were uncertain");
+            assert!(
+                unstable_bits > 1,
+                "only {unstable_bits} bits were uncertain"
+            );
         }
         other => panic!("expected an instability verdict, got: {other:?}"),
     }
@@ -557,7 +563,10 @@ fn the_capacity_boundary_is_exact_and_the_last_payload_that_fits_round_trips() {
             available: reported,
             ..
         })) => {
-            assert_eq!(reported, available, "the sizer must measure what we measured");
+            assert_eq!(
+                reported, available,
+                "the sizer must measure what we measured"
+            );
             payload - sealed_len(probe)
         }
         Ok(()) => panic!("a payload of the full capacity cannot also fit its own overhead"),
@@ -602,7 +611,10 @@ fn the_capacity_boundary_is_exact_and_the_last_payload_that_fits_round_trips() {
         .map(|_| ())
         .expect_err("one byte past the boundary must be refused");
     assert!(
-        matches!(error, PipelineError::Sizer(SizerError::PayloadTooLarge { .. })),
+        matches!(
+            error,
+            PipelineError::Sizer(SizerError::PayloadTooLarge { .. })
+        ),
         "got: {error:?}"
     );
 }

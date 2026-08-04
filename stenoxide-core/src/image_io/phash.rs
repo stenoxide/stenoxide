@@ -628,9 +628,10 @@ mod tests {
     /// within `2 * DELTA_MIN` of each other often enough that pinning a
     /// literal seed would make these tests brittle for no reason.
     fn stable_noise_image(seed: u64) -> ImageBuffer {
-        match (seed..seed + 64).map(noise_image).find(|image| {
-            compute_hash_bits(image).unstable_indices().is_empty()
-        }) {
+        match (seed..seed + 64)
+            .map(noise_image)
+            .find(|image| compute_hash_bits(image).unstable_indices().is_empty())
+        {
             Some(image) => image,
             None => panic!("no stable container in sixty-four candidates from {seed}"),
         }
@@ -745,15 +746,14 @@ mod tests {
     #[test]
     fn uncertain_bits_never_appear_alone() {
         for seed in 0..64u64 {
-            let unstable = compute_hash_bits(&noise_image(seed)).unstable_indices().len();
+            let unstable = compute_hash_bits(&noise_image(seed))
+                .unstable_indices()
+                .len();
 
             assert_ne!(unstable, 1, "seed {seed} produced a lone uncertain bit");
         }
 
-        assert_ne!(
-            compute_hash_bits(&flat_image()).unstable_indices().len(),
-            1
-        );
+        assert_ne!(compute_hash_bits(&flat_image()).unstable_indices().len(), 1);
     }
 
     /// The hash is a function of the image and of nothing else.

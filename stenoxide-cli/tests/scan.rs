@@ -232,8 +232,14 @@ fn the_json_form_carries_the_whole_answer() {
 
     assert!(document.contains("\"scanned\": 2"), "got: {document}");
     assert!(document.contains("\"capacity_kb\":"), "got: {document}");
-    assert!(document.contains("\"dimensions\": [2000, 2000]"), "got: {document}");
-    assert!(document.contains("\"reason\": \"ImageTooSmall\""), "got: {document}");
+    assert!(
+        document.contains("\"dimensions\": [2000, 2000]"),
+        "got: {document}"
+    );
+    assert!(
+        document.contains("\"reason\": \"ImageTooSmall\""),
+        "got: {document}"
+    );
 }
 
 /// TEST 25 — a single file and a glob pattern name the same thing.
@@ -249,7 +255,11 @@ fn a_file_and_a_pattern_reach_the_same_image() {
         "got: {by_name}"
     );
 
-    let pattern = directory.path().join("*.png").to_string_lossy().into_owned();
+    let pattern = directory
+        .path()
+        .join("*.png")
+        .to_string_lossy()
+        .into_owned();
     // The pattern reaches the PNG and not the JPEG beside it, which is what
     // distinguishes it from scanning the directory.
     let by_pattern = stdout_of(&stenoxide(&["scan", &pattern]));
@@ -261,7 +271,11 @@ fn a_file_and_a_pattern_reach_the_same_image() {
 
     // A pattern matching nothing is an error, because the user asked about
     // files they believe exist.
-    let missing = directory.path().join("*.tiff").to_string_lossy().into_owned();
+    let missing = directory
+        .path()
+        .join("*.tiff")
+        .to_string_lossy()
+        .into_owned();
     let output = stenoxide(&["scan", &missing]);
     assert!(!output.status.success());
     assert!(
@@ -342,10 +356,7 @@ fn every_rejection_names_itself_in_the_report() {
     // A container of the right size with no texture anywhere: it passes every
     // gate of layer 1 and is refused by the first thing that reads its content.
     image::RgbImage::from_pixel(2000, 2000, image::Rgb([128, 128, 128]))
-        .save_with_format(
-            directory.path().join("flat.png"),
-            image::ImageFormat::Png,
-        )
+        .save_with_format(directory.path().join("flat.png"), image::ImageFormat::Png)
         .expect("a flat png should be writable");
 
     let path = directory.path().to_string_lossy().into_owned();
@@ -357,7 +368,10 @@ fn every_rejection_names_itself_in_the_report() {
         "DecodingError",
         "InsufficientTexture",
     ] {
-        assert!(report.contains(reason), "{reason} is missing from: {report}");
+        assert!(
+            report.contains(reason),
+            "{reason} is missing from: {report}"
+        );
     }
 
     assert!(

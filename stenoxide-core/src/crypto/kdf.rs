@@ -234,7 +234,10 @@ mod tests {
     fn the_default_deriver_carries_the_compiled_in_cost() {
         let kdf = Argon2Kdf::default_secure();
 
-        assert_eq!((kdf.m_cost, kdf.t_cost, kdf.parallelism), (M_COST, T_COST, PARALLELISM));
+        assert_eq!(
+            (kdf.m_cost, kdf.t_cost, kdf.parallelism),
+            (M_COST, T_COST, PARALLELISM)
+        );
     }
 
     /// Both failures explain themselves.

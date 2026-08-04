@@ -88,7 +88,10 @@ fn a_flipped_bit_fails_authentication() {
         .expect_err("a modified ciphertext must not authenticate");
 
     assert!(
-        matches!(error, CryptoError::AEADError(AEADError::AuthenticationFailed)),
+        matches!(
+            error,
+            CryptoError::AEADError(AEADError::AuthenticationFailed)
+        ),
         "expected an authentication failure, got: {error:?}"
     );
 }

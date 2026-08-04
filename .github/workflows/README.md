@@ -221,23 +221,26 @@ case where the dependency requirement is most likely to have been forgotten.
 
 ## Branch protection
 
-`stable` publishes, so the gate in front of it is the one that has to hold: a
-merge into it uploads binaries to a GitHub Release and two crates to crates.io,
-neither of which can be taken back. The rules are kept in this repository, at
-[`.github/rulesets/stable.json`](../rulesets/stable.json), and applied with:
+Both branches are gated by a ruleset kept in this repository, under
+[`.github/rulesets/`](../rulesets/), and applied with:
 
 ```sh
-gh api --method POST repos/OWNER/REPO/rulesets --input .github/rulesets/stable.json
+gh api --method POST repos/OWNER/REPO/rulesets --input .github/rulesets/NAME.json
 ```
 
 To update an existing ruleset, `PUT` to `…/rulesets/{id}` with the same file;
 `gh api repos/OWNER/REPO/rulesets` lists the ids. Verify what is live with:
 
 ```sh
-gh api repos/OWNER/REPO/rules/branches/stable
+gh api repos/OWNER/REPO/rules/branches/NAME
 ```
 
-What it enforces:
+### `stable`
+
+`stable` publishes, so the gate in front of it is the one that has to hold: a
+merge into it uploads binaries to a GitHub Release and two crates to crates.io,
+neither of which can be taken back.
+[`.github/rulesets/stable.json`](../rulesets/stable.json) enforces:
 
 | Rule | Why |
 |------|-----|
@@ -251,7 +254,7 @@ Approvals are not required. A repository this size would only be gating on its
 own author, and a rule that has to be bypassed on every merge protects nothing.
 The checks are what the rule is for.
 
-### The one bypass
+#### The one bypass
 
 GitHub Actions is a bypass actor, and has to be. The release job pushes the
 version commit to `stable` with `GITHUB_TOKEN`, and every rule above applies to
@@ -263,9 +266,45 @@ rule: classic protection can exempt administrators, which is both broader than
 needed and does not cover a bot, while a ruleset can name GitHub Actions
 specifically and leave everyone else fully gated.
 
-`main` is deliberately left unprotected. It collects work and publishes
-nothing, and its content is re-checked in full by the pull request that promotes
-it to `stable`.
+### `main`
+
+`main` collects work and publishes nothing, and everything on it is re-checked
+in full by the pull request that promotes it to `stable`. What it still owes is
+that nothing lands red: a pull request into `main` cannot be merged until both
+checks are green. [`.github/rulesets/main.json`](../rulesets/main.json)
+enforces:
+
+| Rule | Why |
+|------|-----|
+| **Test and validate** must pass | The tests, clippy and the coverage floor. The release-only steps are skipped for a `main` target, so this is the correctness half of the same job. |
+| **Pull request title** must pass | The title is the fallback subject a squash lands with, and what the next promotion to `stable` reads. |
+| No force push, no deletion | The history a merged pull request was checked against stays where it is. |
+
+No pull request is required, and the branch is not required to be up to date.
+Both are deliberate: a direct push is still allowed (see below), and forcing a
+rebase whenever something else lands first buys nothing on a branch whose
+content is verified again on the way to `stable`.
+
+#### Why an owner can still push straight to `main`
+
+The two are not separable as cleanly as they look. A required status check is
+evaluated against whatever updates the ref, so the rule that blocks a red merge
+blocks a direct push too — a freshly written commit carries no checks at all,
+and the push is refused outright:
+
+```
+remote: - 2 of 2 required status checks are expected.
+```
+
+No rule mode distinguishes the two cases. The API's `bypass_mode` offers
+`pull_request`, which exempts an actor *on pull requests only* — precisely the
+wrong way round — and `always`. So organisation owners are exempt `always`, and
+the asymmetry is one of friction rather than of rule: a direct push goes
+through and is recorded as a bypass, while on a pull request the merge box
+shows the gate and getting past a red check takes a deliberate bypass instead
+of the ordinary merge button.
+
+For everyone else — collaborators, forks, Dependabot — the gate is absolute.
 
 ## Platforms built
 

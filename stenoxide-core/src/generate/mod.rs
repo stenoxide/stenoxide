@@ -99,6 +99,7 @@ use crate::crypto::kdf::{Argon2Kdf, KdfError, KeyDeriver};
 use crate::image_io::buffer::{ColorSpace, CoverSource, ImageBuffer};
 use crate::image_io::jpeg_detect::detect_jpeg_artifacts;
 use crate::image_io::phash::compute_stable_phash;
+use crate::image_io::validate::{MAX_PIXELS, MIN_DIMENSION};
 use crate::pipeline::error::OutputError;
 use crate::pipeline::frame::write_png;
 
@@ -107,13 +108,29 @@ use self::texture::Texture;
 
 pub use self::carrier::RejectionExhausted;
 
-/// Side length of a generated container, in pixels.
+/// Smallest side a generated container may have, in pixels.
 ///
-/// Exactly the minimum layer 1 accepts. Larger containers carry more, but the
-/// side is not a parameter: it is what fixes the cell size of the texture, and
-/// a caller choosing it would be choosing a number the perceptual-hash gate has
-/// an opinion about.
-pub(crate) const CONTAINER_SIDE: u32 = 2000;
+/// Exactly the floor [`crate::image_io::validate`] applies to a container read
+/// from disk: a container this mode draws has to be one that mode would accept
+/// back, so the two share the number rather than each naming their own. It is
+/// also, for the texture, the smallest side whose cell scale the perceptual-hash
+/// gate reliably accepts — the reason the side used to be fixed here.
+pub const MIN_CONTAINER_SIDE: u32 = MIN_DIMENSION;
+
+/// Largest pixel count a generated container may have.
+///
+/// The same ceiling the loader refuses above, and for the same reason: a
+/// receiver has to analyse whatever a sender draws, and that analysis costs
+/// memory linear in the pixel count. A container the sender could draw but the
+/// receiver could not load would be useless to both.
+pub const MAX_CONTAINER_PIXELS: u64 = MAX_PIXELS;
+
+/// Side of the square container generated when no size is requested.
+///
+/// The historical default, kept as the behaviour of the size-less call: it is
+/// the minimum, so it is the smallest — and therefore least conspicuous — file
+/// the mode will produce.
+pub const DEFAULT_CONTAINER_SIDE: u32 = MIN_CONTAINER_SIDE;
 
 /// Channels of a generated container. It is written as 8-bit RGB.
 const CHANNELS: usize = 3;
@@ -135,6 +152,89 @@ const MAX_CANDIDATES: u32 = 64;
 
 /// Bytes of the seed the generator is started from.
 const SEED_BYTES: usize = 32;
+
+/// The size of the container to draw, checked against the two size gates.
+///
+/// A validated pair rather than two loose integers: the only way to obtain one
+/// is [`ContainerDimensions::new`], which refuses anything the loader would
+/// refuse, so no code downstream has to re-check a width or a height. A larger
+/// container carries more — capacity is a straight function of its pixel count —
+/// but every size this type admits is one a receiver can load and one whose
+/// texture feeds the hash gate the same octave the default does; see
+/// [`crate::generate::texture`] for why enlarging is safe rather than merely
+/// tolerated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContainerDimensions {
+    /// Width, in pixels. At least [`MIN_CONTAINER_SIDE`].
+    width: u32,
+    /// Height, in pixels. At least [`MIN_CONTAINER_SIDE`].
+    height: u32,
+}
+
+impl ContainerDimensions {
+    /// A dimensions pair, if it clears both gates a loaded container is held to.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GenerateError::DimensionsOutOfRange`] when either side is below
+    /// [`MIN_CONTAINER_SIDE`], or when the two multiply to more than
+    /// [`MAX_CONTAINER_PIXELS`]. The product is taken in [`u64`] so that two
+    /// large sides cannot wrap into a small count and slip past the ceiling.
+    pub fn new(width: u32, height: u32) -> Result<Self, GenerateError> {
+        let out_of_range = || GenerateError::DimensionsOutOfRange {
+            width,
+            height,
+            min_side: MIN_CONTAINER_SIDE,
+            max_pixels: MAX_CONTAINER_PIXELS,
+        };
+
+        if width < MIN_CONTAINER_SIDE || height < MIN_CONTAINER_SIDE {
+            return Err(out_of_range());
+        }
+        if u64::from(width) * u64::from(height) > MAX_CONTAINER_PIXELS {
+            return Err(out_of_range());
+        }
+
+        Ok(Self { width, height })
+    }
+
+    /// Width of the container, in pixels.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Height of the container, in pixels.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Ciphertext bytes a container of this size carries.
+    ///
+    /// One bit per sample, tag included: the ciphertext occupies the container
+    /// exactly, to the last sample it can fill.
+    fn capacity(self) -> usize {
+        self.width as usize * self.height as usize * CHANNELS / 8
+    }
+
+    /// Compressed payload bytes a container of this size admits.
+    ///
+    /// What is left of the capacity once the authentication tag and the length
+    /// header are paid for.
+    fn payload_capacity(self) -> usize {
+        self.capacity().saturating_sub(TAG_BYTES + LENGTH_HEADER_BYTES)
+    }
+}
+
+impl Default for ContainerDimensions {
+    /// The square container the size-less call produces; see
+    /// [`DEFAULT_CONTAINER_SIDE`].
+    fn default() -> Self {
+        Self {
+            width: DEFAULT_CONTAINER_SIDE,
+            height: DEFAULT_CONTAINER_SIDE,
+        }
+    }
+}
 
 /// What one generation produced.
 ///
@@ -164,14 +264,30 @@ pub enum GenerateError {
     /// one an adversary can reproduce, and a container generated from a
     /// guessable seed is one they can regenerate and compare against.
     Entropy(String),
-    /// The compressed payload is larger than a container can hold.
+    /// The compressed payload is larger than the requested container can hold.
     PayloadTooLarge {
         /// Payload bytes after compression.
         payload: usize,
-        /// Compressed payload bytes the container admits.
+        /// Compressed payload bytes the requested container admits.
         available: usize,
         /// How far over the limit the payload is, in bytes.
         deficit: usize,
+        /// Side of the smallest square container that would admit this payload,
+        /// rounded up to a round figure for quoting to a user, or `None` when
+        /// no permitted container is large enough. A caller with a size to
+        /// suggest reads it from here rather than solving the quadratic itself.
+        recommended_side: Option<u32>,
+    },
+    /// The requested container size is outside the permitted range.
+    DimensionsOutOfRange {
+        /// Requested width, in pixels.
+        width: u32,
+        /// Requested height, in pixels.
+        height: u32,
+        /// Smallest side either dimension may have.
+        min_side: u32,
+        /// Largest pixel count the two may multiply to.
+        max_pixels: u64,
     },
     /// No candidate texture passed the container gates.
     NoUsableTexture {
@@ -202,10 +318,22 @@ impl fmt::Display for GenerateError {
                 payload,
                 available,
                 deficit,
+                ..
             } => write!(
                 f,
-                "the payload does not fit in a generated container: {payload} bytes after \
+                "the payload does not fit in the requested container: {payload} bytes after \
                  compression against the {available} it admits, {deficit} bytes over"
+            ),
+            GenerateError::DimensionsOutOfRange {
+                width,
+                height,
+                min_side,
+                max_pixels,
+            } => write!(
+                f,
+                "the requested container is {width}x{height}, which is outside the permitted \
+                 range: each side must be at least {min_side} pixels and the two together at \
+                 most {max_pixels} pixels"
             ),
             GenerateError::NoUsableTexture { candidates } => write!(
                 f,
@@ -230,6 +358,7 @@ impl std::error::Error for GenerateError {
             GenerateError::Output(err) => Some(err),
             GenerateError::Entropy(_)
             | GenerateError::PayloadTooLarge { .. }
+            | GenerateError::DimensionsOutOfRange { .. }
             | GenerateError::NoUsableTexture { .. } => None,
         }
     }
@@ -271,27 +400,75 @@ impl From<OutputError> for GenerateError {
     }
 }
 
-/// Ciphertext bytes a generated container carries.
+/// The side of a comfortable square container for a payload this large.
 ///
-/// One bit per sample, tag included: the ciphertext occupies the container
-/// exactly, to the last sample it can fill.
-fn container_capacity() -> usize {
-    CONTAINER_SIDE as usize * CONTAINER_SIDE as usize * CHANNELS / 8
+/// The smallest square whose payload capacity clears `payload`, then rounded up
+/// to the next hundred pixels — a figure a person can read and repeat, with a
+/// little headroom over the exact break-even side rather than sitting right on
+/// it. `None` when even the largest permitted container is too small: that is
+/// the payload's problem and not a size the user can dial around.
+///
+/// The rounding never pushes the suggestion past [`MAX_CONTAINER_PIXELS`]; on
+/// the rare payload whose break-even side is within a hundred pixels of the
+/// ceiling, the exact side is quoted instead of a round one that would not fit.
+fn recommended_square_side(payload: usize) -> Option<u32> {
+    // capacity(side) = side * side * CHANNELS / 8 - overhead, and a `u8/8`
+    // capacity clears `payload` exactly when the sample count reaches
+    // `8 * (payload + overhead)`. Everything is taken in `u64`: the product of
+    // two sides is what the size gate guards against wrapping, and this is the
+    // same product read backwards.
+    let overhead = (TAG_BYTES + LENGTH_HEADER_BYTES) as u64;
+    let needed_bytes = (payload as u64).checked_add(overhead)?;
+    let needed_pixels = needed_bytes.checked_mul(8)?.div_ceil(CHANNELS as u64);
+
+    if needed_pixels > MAX_CONTAINER_PIXELS {
+        return None;
+    }
+
+    let exact_side = integer_sqrt_ceil(needed_pixels).max(MIN_CONTAINER_SIDE);
+    let rounded = exact_side.div_ceil(100).saturating_mul(100);
+
+    // The round figure unless it would spill over the pixel ceiling, in which
+    // case the exact break-even side — already known to fit — is quoted.
+    let side = if u64::from(rounded) * u64::from(rounded) <= MAX_CONTAINER_PIXELS {
+        rounded
+    } else {
+        exact_side
+    };
+
+    Some(side)
 }
 
-/// Compressed payload bytes a generated container admits.
+/// The smallest integer whose square is at least `value`.
 ///
-/// What is left of the capacity once the authentication tag and the length
-/// header are paid for.
-fn payload_capacity() -> usize {
-    container_capacity().saturating_sub(TAG_BYTES + LENGTH_HEADER_BYTES)
+/// A float square root corrected in both directions rather than trusted: the
+/// conversion is exact for the pixel counts this is called with — all below the
+/// megapixel ceiling — but the correction costs nothing and removes the last
+/// place a rounding error could quote a container one pixel too small.
+fn integer_sqrt_ceil(value: u64) -> u32 {
+    let mut root = (value as f64).sqrt() as u64;
+
+    while root.saturating_mul(root) < value {
+        root += 1;
+    }
+    while root > 0 && (root - 1).saturating_mul(root - 1) >= value {
+        root -= 1;
+    }
+
+    u32::try_from(root).unwrap_or(u32::MAX)
 }
 
-/// Builds a container around `plaintext` and writes it to `output_path`.
+/// Builds a `dimensions` container around `plaintext` and writes it to
+/// `output_path`.
 ///
 /// Both secrets are taken by value in a [`Zeroizing`] wrapper, as in
 /// [`crate::pipeline::EmbedPipeline::embed`]: this function becomes their owner
 /// and wipes them where they stop being needed.
+///
+/// `dimensions` is already validated — the only way to hold one is
+/// [`ContainerDimensions::new`] — so this function cannot be handed a size the
+/// loader would refuse. Pass [`ContainerDimensions::default`] for the historical
+/// square container when no particular size is wanted.
 ///
 /// The container it writes does not hide that it was generated. It hides which
 /// of several generated containers carries a message; see the module
@@ -301,18 +478,20 @@ fn payload_capacity() -> usize {
 /// # Errors
 ///
 /// Returns a [`GenerateError`] when the system random number generator cannot
-/// be read, the compressed payload does not fit, no candidate texture passes
-/// the container gates, a cryptographic step fails, or the file cannot be
-/// written.
+/// be read, the compressed payload does not fit the requested size, no candidate
+/// texture passes the container gates, a cryptographic step fails, or the file
+/// cannot be written.
 pub fn generate_container(
     plaintext: Zeroizing<Vec<u8>>,
     password: Zeroizing<Vec<u8>>,
+    dimensions: ContainerDimensions,
     output_path: &Path,
 ) -> Result<GenerateReport, GenerateError> {
     generate(
         &Argon2Kdf::default_secure(),
         plaintext,
         password,
+        dimensions,
         output_path,
     )
 }
@@ -332,9 +511,10 @@ pub fn generate_container_with_deriver(
     kdf: &dyn KeyDeriver,
     plaintext: Zeroizing<Vec<u8>>,
     password: Zeroizing<Vec<u8>>,
+    dimensions: ContainerDimensions,
     output_path: &Path,
 ) -> Result<GenerateReport, GenerateError> {
-    generate(kdf, plaintext, password, output_path)
+    generate(kdf, plaintext, password, dimensions, output_path)
 }
 
 /// The generator proper.
@@ -362,6 +542,7 @@ fn generate(
     kdf: &dyn KeyDeriver,
     plaintext: Zeroizing<Vec<u8>>,
     password: Zeroizing<Vec<u8>>,
+    dimensions: ContainerDimensions,
     output_path: &Path,
 ) -> Result<GenerateReport, GenerateError> {
     let cipher = XChaCha20Poly1305Cipher::new();
@@ -371,24 +552,28 @@ fn generate(
     let compressed = compress(plaintext.as_slice())?;
     drop(plaintext);
 
-    let available = payload_capacity();
+    let available = dimensions.payload_capacity();
     if compressed.len() > available {
         return Err(GenerateError::PayloadTooLarge {
             payload: compressed.len(),
             available,
             deficit: compressed.len() - available,
+            // A square suggestion even for a rectangular request: it is the one
+            // shape a single figure describes, and the user is free to spend it
+            // on whichever pair of sides they like.
+            recommended_side: recommended_square_side(compressed.len()),
         });
     }
 
     let mut rng = seed_from_system()?;
 
     for _ in 0..MAX_CANDIDATES {
-        let texture = Texture::new(rng.next_u64());
+        let texture = Texture::new(rng.next_u64(), dimensions.width(), dimensions.height());
 
         // Step 2 and 3. The draft exists only in memory, and only long enough
         // to be judged: it is the cover, and the cover is the thing this mode
         // exists to not leave lying around.
-        let draft = render(&texture, &mut rng, None)?;
+        let draft = render(&texture, dimensions, &mut rng, None)?;
         let Ok(draft_salt) = compute_stable_phash(&draft) else {
             continue;
         };
@@ -403,11 +588,11 @@ fn generate(
         let derived_keys = expand_master_key(&master_key)?;
         drop(master_key);
 
-        let ciphertext = seal(&compressed, &mut rng, &derived_keys, &cipher)?;
+        let ciphertext = seal(&compressed, dimensions, &mut rng, &derived_keys, &cipher)?;
         drop(derived_keys);
 
         // Steps 6 and 7.
-        let container = render(&texture, &mut rng, Some(&ciphertext))?;
+        let container = render(&texture, dimensions, &mut rng, Some(&ciphertext))?;
         drop(ciphertext);
 
         let Ok(final_salt) = compute_stable_phash(&container) else {
@@ -497,16 +682,17 @@ fn shows_jpeg_grid(image: &ImageBuffer) -> bool {
 /// converge, which no base level this crate's texture produces can cause.
 fn render(
     texture: &Texture,
+    dimensions: ContainerDimensions,
     rng: &mut StdRng,
     carrier: Option<&[u8]>,
 ) -> Result<ImageBuffer, GenerateError> {
-    let side = CONTAINER_SIDE as usize;
-    let mut samples = vec![0u8; side * side * CHANNELS];
+    let (width, height) = (dimensions.width(), dimensions.height());
+    let mut samples = vec![0u8; width as usize * height as usize * CHANNELS];
     let carrier_bits = carrier.map_or(0, |bytes| bytes.len() * 8);
 
     let mut position = 0usize;
-    for y in 0..CONTAINER_SIDE {
-        for x in 0..CONTAINER_SIDE {
+    for y in 0..height {
+        for x in 0..width {
             // Once per pixel rather than once per channel: the field is a
             // property of the position, and the three channels are tints of it.
             let base_levels = texture.base_levels(x, y);
@@ -530,12 +716,7 @@ fn render(
         }
     }
 
-    Ok(ImageBuffer::new(
-        samples,
-        CONTAINER_SIDE,
-        CONTAINER_SIDE,
-        ColorSpace::Rgb8,
-    ))
+    Ok(ImageBuffer::new(samples, width, height, ColorSpace::Rgb8))
 }
 
 /// Builds the buffer the container is filled with, and encrypts it.
@@ -567,11 +748,12 @@ fn render(
 /// Returns [`GenerateError::Crypto`] if the cipher refuses the buffer.
 fn seal(
     compressed: &[u8],
+    dimensions: ContainerDimensions,
     rng: &mut StdRng,
     keys: &DerivedKeys,
     cipher: &dyn AEADCipher,
 ) -> Result<Zeroizing<Vec<u8>>, GenerateError> {
-    let plaintext_len = container_capacity().saturating_sub(TAG_BYTES);
+    let plaintext_len = dimensions.capacity().saturating_sub(TAG_BYTES);
 
     let mut buffer = Zeroizing::new(Vec::with_capacity(plaintext_len));
     // Checked against `payload_capacity` by the caller, so the conversion holds
@@ -685,11 +867,79 @@ mod tests {
     /// The container is filled to the last sample it can carry.
     #[test]
     fn the_ciphertext_is_sized_to_the_container() {
-        let samples = CONTAINER_SIDE as usize * CONTAINER_SIDE as usize * CHANNELS;
+        let default = ContainerDimensions::default();
+        let samples = default.width() as usize * default.height() as usize * CHANNELS;
 
-        assert_eq!(container_capacity(), samples / 8);
-        assert_eq!(container_capacity(), 1_500_000);
-        assert_eq!(payload_capacity(), 1_500_000 - TAG_BYTES - LENGTH_HEADER_BYTES);
+        assert_eq!(default.capacity(), samples / 8);
+        assert_eq!(default.capacity(), 1_500_000);
+        assert_eq!(
+            default.payload_capacity(),
+            1_500_000 - TAG_BYTES - LENGTH_HEADER_BYTES
+        );
+    }
+
+    /// Capacity is a straight function of the pixel count, square or not.
+    ///
+    /// The whole reason a larger container fits a larger payload: every sample
+    /// carries one bit, so the admitted payload grows with `width * height` and
+    /// a rectangle admits exactly what a square of the same area does.
+    #[test]
+    fn capacity_follows_the_pixel_count() {
+        let square = ContainerDimensions::new(4000, 4000).expect("within range");
+        let rectangle = ContainerDimensions::new(2000, 8000).expect("within range");
+
+        assert_eq!(square.capacity(), 4000 * 4000 * CHANNELS / 8);
+        assert_eq!(square.capacity(), rectangle.capacity());
+        assert!(square.capacity() > ContainerDimensions::default().capacity());
+    }
+
+    /// The size gates refuse a side below the floor and a product above the cap.
+    #[test]
+    fn dimensions_are_held_to_both_gates() {
+        assert!(ContainerDimensions::new(MIN_CONTAINER_SIDE, MIN_CONTAINER_SIDE).is_ok());
+
+        let too_short = ContainerDimensions::new(MIN_CONTAINER_SIDE - 1, MIN_CONTAINER_SIDE)
+            .map(|_| ())
+            .expect_err("a side below the floor must be refused");
+        assert!(matches!(
+            too_short,
+            GenerateError::DimensionsOutOfRange { .. }
+        ));
+
+        // A width that alone is fine but multiplies past the ceiling.
+        let widest = (MAX_CONTAINER_PIXELS / u64::from(MIN_CONTAINER_SIDE)) as u32;
+        assert!(ContainerDimensions::new(widest, MIN_CONTAINER_SIDE).is_ok());
+        let over = ContainerDimensions::new(widest + 100, MIN_CONTAINER_SIDE)
+            .map(|_| ())
+            .expect_err("a product above the ceiling must be refused");
+        assert!(matches!(over, GenerateError::DimensionsOutOfRange { .. }));
+    }
+
+    /// The recommended side clears the payload, rounds to a hundred, and gives
+    /// up only when no permitted container could hold it.
+    #[test]
+    fn the_recommended_side_is_round_and_sufficient() {
+        // The figure from the user report: about 1.78 MB compressed.
+        let side = recommended_square_side(1_782_778).expect("a container this size exists");
+        assert_eq!(side % 100, 0, "the suggestion must be a round figure");
+        assert!(side >= MIN_CONTAINER_SIDE);
+
+        let admitted = ContainerDimensions::new(side, side)
+            .expect("the suggestion must be within range")
+            .payload_capacity();
+        assert!(
+            admitted >= 1_782_778,
+            "a container of the suggested side must actually hold the payload"
+        );
+        // And it is not wildly oversized: the previous hundred would not do.
+        let admitted_below = ContainerDimensions::new(side - 100, side - 100)
+            .expect("within range")
+            .payload_capacity();
+        assert!(admitted_below < 1_782_778);
+
+        // A payload no permitted container can hold has no suggestion to make.
+        let unattainable = (MAX_CONTAINER_PIXELS as usize) * CHANNELS / 8;
+        assert!(recommended_square_side(unattainable).is_none());
     }
 
     /// The carrier bits are written and read in the same order.
@@ -721,13 +971,14 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(5);
         let cipher = XChaCha20Poly1305Cipher::new();
         let keys = keys();
+        let dimensions = ContainerDimensions::default();
 
         for length in [0usize, 1, 4_096, 100_000] {
             let compressed = vec![0x5Au8; length];
-            let sealed = seal(&compressed, &mut rng, &keys, &cipher)
+            let sealed = seal(&compressed, dimensions, &mut rng, &keys, &cipher)
                 .expect("a payload within capacity must seal");
 
-            assert_eq!(sealed.len(), container_capacity(), "payload of {length}");
+            assert_eq!(sealed.len(), dimensions.capacity(), "payload of {length}");
         }
     }
 
@@ -742,9 +993,11 @@ mod tests {
         let cipher = XChaCha20Poly1305Cipher::new();
         let keys = keys();
 
+        let dimensions = ContainerDimensions::default();
         let message = b"a message that is compressed, sealed and read back".repeat(4);
         let compressed = compress(&message).expect("compression must succeed");
-        let sealed = seal(&compressed, &mut rng, &keys, &cipher).expect("sealing must succeed");
+        let sealed = seal(&compressed, dimensions, &mut rng, &keys, &cipher)
+            .expect("sealing must succeed");
 
         let samples: Vec<u8> = (0..sealed.len() * 8)
             .map(|position| {
@@ -752,12 +1005,17 @@ mod tests {
                 0x80 | ((byte >> (7 - position % 8)) & 1)
             })
             .collect();
-        let image = ImageBuffer::new(samples, CONTAINER_SIDE, CONTAINER_SIDE, ColorSpace::Rgb8);
+        let image = ImageBuffer::new(
+            samples,
+            dimensions.width(),
+            dimensions.height(),
+            ColorSpace::Rgb8,
+        );
 
         match read_generated(&image, &keys, &cipher) {
             Ok((plaintext, bytes)) => {
                 assert_eq!(plaintext.as_slice(), message.as_slice());
-                assert_eq!(bytes, container_capacity());
+                assert_eq!(bytes, dimensions.capacity());
             }
             Err(error) => panic!("a sealed payload must be recovered: {error}"),
         }
@@ -797,6 +1055,14 @@ mod tests {
                 payload: 2_000_000,
                 available: 1_499_980,
                 deficit: 500_020,
+                recommended_side: recommended_square_side(2_000_000),
+            }
+            .to_string(),
+            GenerateError::DimensionsOutOfRange {
+                width: 1_000,
+                height: 3_000,
+                min_side: MIN_CONTAINER_SIDE,
+                max_pixels: MAX_CONTAINER_PIXELS,
             }
             .to_string(),
             GenerateError::NoUsableTexture { candidates: 64 }.to_string(),
@@ -813,13 +1079,21 @@ mod tests {
 
         assert!(messages[0].contains("no device"));
         assert!(messages[1].contains("2000000") && messages[1].contains("500020"));
-        assert!(messages[2].contains("64"));
+        assert!(messages[2].contains("1000x3000") && messages[2].contains("2000"));
+        assert!(messages[3].contains("64"));
 
         // Only the variants that wrap another error have a cause to chain to.
         assert!(std::error::Error::source(&GenerateError::from(KdfError::EmptyPassword)).is_some());
         assert!(
             std::error::Error::source(&GenerateError::NoUsableTexture { candidates: 1 }).is_none()
         );
+        assert!(std::error::Error::source(&GenerateError::DimensionsOutOfRange {
+            width: 1_000,
+            height: 3_000,
+            min_side: MIN_CONTAINER_SIDE,
+            max_pixels: MAX_CONTAINER_PIXELS,
+        })
+        .is_none());
     }
 
     /// The seed comes from the system generator, and it produces a working one.

@@ -42,7 +42,7 @@ use stenoxide_core::cost::CostProvider;
 use stenoxide_core::crypto::aead::XChaCha20Poly1305Cipher;
 use stenoxide_core::crypto::expand::expand_master_key;
 use stenoxide_core::crypto::kdf::{Argon2Kdf, KeyDeriver};
-use stenoxide_core::generate::generate_container_with_deriver;
+use stenoxide_core::generate::{generate_container_with_deriver, ContainerDimensions};
 use stenoxide_core::image_io::buffer::CoverSource;
 use stenoxide_core::image_io::jpeg_detect::detect_jpeg_artifacts;
 use stenoxide_core::image_io::phash::compute_stable_phash;
@@ -81,8 +81,13 @@ fn test_pipeline() -> EmbedPipeline<Argon2Kdf, XChaCha20Poly1305Cipher, HillCost
     )
 }
 
-/// Generates a container around `message` at `name`, and hands back its path.
+/// Generates a default 2000x2000 container around `message` at `name`.
 fn generate(name: &str, message: &[u8]) -> PathBuf {
+    generate_sized(name, message, ContainerDimensions::default())
+}
+
+/// Generates a `dimensions` container around `message` at `name`.
+fn generate_sized(name: &str, message: &[u8], dimensions: ContainerDimensions) -> PathBuf {
     let directory = support::fixtures_dir();
     std::fs::create_dir_all(&directory).expect("fixtures directory should be creatable");
     let path = directory.join(name);
@@ -91,11 +96,15 @@ fn generate(name: &str, message: &[u8]) -> PathBuf {
         &Argon2Kdf::low_cost_for_tests(),
         Zeroizing::new(message.to_vec()),
         secret(PASSWORD),
+        dimensions,
         &path,
     )
     .expect("a payload within capacity must generate a container");
 
-    assert_eq!(report.image_dimensions, (2000, 2000));
+    assert_eq!(
+        report.image_dimensions,
+        (dimensions.width(), dimensions.height())
+    );
     assert!(
         report.payload_bytes <= report.capacity_bytes,
         "the generator must refuse rather than overfill"
@@ -183,6 +192,35 @@ fn a_payload_near_the_capacity_round_trips() {
         .expect("a payload just under the capacity must round trip");
 
     assert_eq!(plaintext.len(), NEAR_CAPACITY_BYTES);
+    assert_eq!(plaintext.as_slice(), payload.as_slice());
+}
+
+/// TEST 3b — a larger, rectangular container carries what a default one cannot.
+///
+/// The whole point of the size being a parameter, end to end: a payload just
+/// over what a 2000x2000 container admits (`1_499_980` bytes) is refused by the
+/// default and accepted by a rectangular container of greater area — which then
+/// round-trips through the ordinary extraction path like any other. It also
+/// exercises the anisotropic texture: a non-square container has to clear the
+/// same hash, cost and block gates a square one does, and this is the only test
+/// that renders one at full size.
+#[test]
+fn a_larger_rectangular_container_carries_a_bigger_payload() {
+    // 2400x2000 admits 1_799_980 compressed bytes, so an incompressible payload
+    // that overflows the default by a comfortable margin still fits here.
+    let dimensions = ContainerDimensions::new(2400, 2000).expect("within the permitted range");
+    let payload = support::incompressible_payload(1_550_000);
+
+    let container = generate_sized("generated_rectangular.png", &payload, dimensions);
+
+    let image = load_and_validate(&container).expect("a larger container must still validate");
+    assert_eq!(image.dimensions(), (2400, 2000));
+
+    let (plaintext, _report) = test_pipeline()
+        .extract(&container, secret(PASSWORD))
+        .expect("a payload that only fits the larger container must round trip");
+
+    assert_eq!(plaintext.len(), payload.len());
     assert_eq!(plaintext.as_slice(), payload.as_slice());
 }
 

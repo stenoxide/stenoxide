@@ -9,6 +9,7 @@
 //! stenoxide extract  --input stego.png                      > message.txt
 //! stenoxide extract  --input stego.png --payload-out secret.zip
 //! stenoxide generate --output container.png --input message.txt
+//! stenoxide generate --output container.png --input big.bin --width 2500 --height 2500
 //! ```
 //!
 //! The payload has always been arbitrary bytes rather than text, so the file
@@ -107,7 +108,10 @@ use zeroize::Zeroizing;
 
 use stenoxide_core::cost::hill::HillCostProvider;
 use stenoxide_core::cost::CostProvider;
-use stenoxide_core::generate::{generate_container, GenerateError, GenerateReport};
+use stenoxide_core::generate::{
+    generate_container, ContainerDimensions, GenerateError, GenerateReport, DEFAULT_CONTAINER_SIDE,
+    MIN_CONTAINER_SIDE,
+};
 use stenoxide_core::image_io::buffer::ImageBuffer;
 use stenoxide_core::image_io::phash::compute_stable_phash;
 use stenoxide_core::image_io::validate::{load_and_validate, ValidationError};
@@ -152,6 +156,11 @@ each one conditioned on the ciphertext bit it carries, so a container holding a
 message and one holding nothing are draws from the same distribution and no
 detector can separate them. It carries about 1.4 MB, against the 8 KB an image
 of the same size admits by embedding.
+
+The default container is 2000x2000, the smallest and least conspicuous the mode
+draws. A payload that does not fit needs a larger one: raise --width and
+--height together (each at least 2000). Capacity grows with the pixel count, so
+the error printed when a payload overflows names a size that would hold it.
 
 It does not hide that the container was generated. It looks like a synthetic
 texture, and a folder full of them is itself the thing worth explaining. Prefer
@@ -206,6 +215,19 @@ enum Command {
         /// standard input is not read at all and any redirection is ignored.
         #[arg(long, value_name = "PATH")]
         input: Option<PathBuf>,
+        /// Width of the container to draw, in pixels. Defaults to 2000, the
+        /// smallest — and least conspicuous — the mode will produce; raise it,
+        /// together with --height, only when a payload does not fit. Must be at
+        /// least 2000.
+        #[arg(long, value_name = "PIXELS", default_value_t = DEFAULT_CONTAINER_SIDE,
+              value_parser = clap::value_parser!(u32).range(i64::from(MIN_CONTAINER_SIDE)..))]
+        width: u32,
+        /// Height of the container to draw, in pixels. Defaults to 2000. Must be
+        /// at least 2000; a larger container carries more, in proportion to its
+        /// pixel count.
+        #[arg(long, value_name = "PIXELS", default_value_t = DEFAULT_CONTAINER_SIDE,
+              value_parser = clap::value_parser!(u32).range(i64::from(MIN_CONTAINER_SIDE)..))]
+        height: u32,
     },
     /// Recover a hidden message from a stego image and write it to standard
     /// output.
@@ -252,7 +274,12 @@ fn main() -> ExitCode {
             output,
             payload,
         } => run_embed(input, output, payload.as_deref()),
-        Command::Generate { output, input } => run_generate(output, input.as_deref()),
+        Command::Generate {
+            output,
+            input,
+            width,
+            height,
+        } => run_generate(output, input.as_deref(), *width, *height),
         Command::Extract {
             input,
             payload_out,
@@ -567,11 +594,25 @@ fn describe_embed_failure(error: &PipelineError) -> String {
 /// before the passphrase is asked for, for the same reason, and there is no
 /// image to validate because there is no image yet.
 ///
+/// The requested size is settled first of all — before even the payload — so
+/// that `--width 1999` is refused instantly rather than after a file has been
+/// read and a passphrase typed. `clap` has already held each side to the 2000
+/// floor; this is where the two are checked against the pixel ceiling together.
+///
 /// # Errors
 ///
-/// Returns the message to print when the payload file cannot be read, the
-/// payload does not fit, or the container cannot be generated or written.
-fn run_generate(output: &Path, input: Option<&Path>) -> Result<(), String> {
+/// Returns the message to print when the size is out of range, the payload file
+/// cannot be read, the payload does not fit, or the container cannot be
+/// generated or written.
+fn run_generate(
+    output: &Path,
+    input: Option<&Path>,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let dimensions =
+        ContainerDimensions::new(width, height).map_err(|err| describe_generate_failure(&err))?;
+
     // A payload path that cannot be read is settled before the prompt, exactly
     // as in `run_embed`: a mistyped path is a wasted passphrase either way, and
     // the handle is kept so that the file checked and the file read are one.
@@ -598,7 +639,7 @@ fn run_generate(output: &Path, input: Option<&Path>) -> Result<(), String> {
     // container size and of how many candidate textures the gates refuse.
     let activity = progress::Activity::start();
 
-    let outcome = generate_container(plaintext, password, output);
+    let outcome = generate_container(plaintext, password, dimensions, output);
 
     activity.finish();
 
@@ -610,29 +651,72 @@ fn run_generate(output: &Path, input: Option<&Path>) -> Result<(), String> {
 
 /// Turns a failure of the generator into the sentence the user reads.
 ///
-/// Only the capacity refusal is rewritten, on the same principle as
+/// Two cases are rewritten, and the rest keep the sentence their own layer
+/// wrote. The capacity refusal is rewritten on the same principle as
 /// [`describe_embed_failure`]: the figure quoted is the payload *after*
 /// compression, and a message that did not say so would read as a false claim
-/// about the size of the user's file.
+/// about the size of the user's file. It now also names a larger container that
+/// would fit and the two flags that ask for one — the whole point of the size
+/// being a parameter is undone if the error does not say it is.
+///
+/// The out-of-range refusal is rewritten only to prefix it with `Error:` and to
+/// name the two flags, so that a user who reached for them and overshot is
+/// pointed back at the range rather than left with a bare library sentence.
 fn describe_generate_failure(error: &GenerateError) -> String {
-    let GenerateError::PayloadTooLarge {
-        payload,
-        available,
-        deficit,
-    } = error
-    else {
-        return format!("Error: {error}");
+    match error {
+        GenerateError::PayloadTooLarge {
+            payload,
+            available,
+            deficit,
+            recommended_side,
+        } => describe_payload_too_large(*payload, *available, *deficit, *recommended_side),
+        GenerateError::DimensionsOutOfRange { .. } => format!(
+            "Error: {error}.\n       \
+             Set the size with --width and --height; both must be at least 2000 \
+             pixels."
+        ),
+        other => format!("Error: {other}"),
+    }
+}
+
+/// The capacity refusal, with a container size to reach for.
+///
+/// The advice is the reason the size became a parameter: rather than "your
+/// payload is too large, full stop", it quotes a square that would hold this
+/// payload and the flags that ask for it. The suggestion is square because one
+/// figure describes a square; a user who wants a different shape now knows the
+/// area to aim for and can spend it on whatever width and height they like.
+fn describe_payload_too_large(
+    payload: usize,
+    available: usize,
+    deficit: usize,
+    recommended_side: Option<u32>,
+) -> String {
+    let advice = match recommended_side {
+        Some(side) => format!(
+            "A larger container would hold it: at about {side}x{side} it fits.\n       \
+             Ask for one with  --width {side} --height {side}  (both must be at \
+             least 2000).\n       \
+             Any width and height whose area is at least that will do; the \
+             suggestion is square only because one number is easier to quote."
+        ),
+        // No permitted container is large enough. This is the payload's size,
+        // not a dial the user can turn, so it is said plainly rather than
+        // dressed up as a resolution to reach for.
+        None => "No permitted container is large enough for a payload this size; \
+                 a generated container is capped at 128 megapixels.\n       \
+                 Split the payload, or compress it further before hiding it."
+            .to_owned(),
     };
 
     format!(
-        "Error: the payload does not fit in a generated container.\n       \
-         Compressed and encrypted it is {payload} bytes; a container admits \
+        "Error: the payload does not fit in the requested container.\n       \
+         Compressed and encrypted it is {payload} bytes; the container admits \
          {available}.\n       \
          It is {deficit} bytes over.\n       \
          That first figure is the payload after compression, not the size of \
          the file.\n       \
-         A generated container is always 2000x2000, so this limit is not one \
-         a larger image can raise."
+         {advice}"
     )
 }
 
@@ -1042,6 +1126,69 @@ mod tests {
         let message = describe_embed_failure(&error);
 
         assert_eq!(message, format!("Error: {error}"));
+    }
+
+    /// An oversized generated payload is told the numbers and a size to reach.
+    ///
+    /// The generator's counterpart of the embed test above, plus the one thing
+    /// this mode adds: the size is a parameter, so the message names a container
+    /// that would fit and the two flags that ask for it. Quoting the numbers but
+    /// not the way out would leave the user with a resolution they cannot act on.
+    #[test]
+    fn an_oversized_generated_payload_names_a_size_and_the_flags() {
+        let message = describe_generate_failure(&GenerateError::PayloadTooLarge {
+            payload: 1_782_778,
+            available: 1_499_980,
+            deficit: 282_798,
+            recommended_side: Some(2_200),
+        });
+
+        assert!(message.contains("1782778"), "got: {message}");
+        assert!(message.contains("1499980"), "got: {message}");
+        assert!(message.contains("282798"), "got: {message}");
+        assert!(
+            message.contains("after compression"),
+            "the message must not read as a claim about the file's size: {message}"
+        );
+        // The way out: a concrete size and the flags that request it.
+        assert!(message.contains("2200x2200"), "got: {message}");
+        assert!(message.contains("--width 2200"), "got: {message}");
+        assert!(message.contains("--height 2200"), "got: {message}");
+    }
+
+    /// A payload no container can hold is told so plainly, with no size to chase.
+    ///
+    /// The `None` recommendation is not "try a bigger number"; it is the pixel
+    /// ceiling, so the advice has to change from a resolution to a suggestion to
+    /// split or compress the payload.
+    #[test]
+    fn a_payload_beyond_every_container_is_told_plainly() {
+        let message = describe_generate_failure(&GenerateError::PayloadTooLarge {
+            payload: 60_000_000,
+            available: 1_499_980,
+            deficit: 58_500_020,
+            recommended_side: None,
+        });
+
+        assert!(message.contains("No permitted container"), "got: {message}");
+        assert!(message.contains("128 megapixels"), "got: {message}");
+        assert!(!message.contains("--width"), "no size to reach: {message}");
+    }
+
+    /// An out-of-range size is prefixed and pointed back at the two flags.
+    #[test]
+    fn an_out_of_range_size_names_the_flags() {
+        let message = describe_generate_failure(&GenerateError::DimensionsOutOfRange {
+            width: 1_500,
+            height: 3_000,
+            min_side: MIN_CONTAINER_SIDE,
+            max_pixels: stenoxide_core::generate::MAX_CONTAINER_PIXELS,
+        });
+
+        assert!(message.starts_with("Error:"), "got: {message}");
+        assert!(message.contains("1500x3000"), "got: {message}");
+        assert!(message.contains("--width"), "got: {message}");
+        assert!(message.contains("--height"), "got: {message}");
     }
 
     /// A destination that is not there yet, and a directory, are both fine.

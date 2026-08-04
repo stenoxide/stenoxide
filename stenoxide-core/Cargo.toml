@@ -40,6 +40,34 @@ rand.workspace = true
 tempfile.workspace = true
 static_assertions.workspace = true
 
+# A research harness, not a product surface: it builds the matched cover/stego
+# pairs that `scripts/synthetic_cover_analysis` measures. It reaches into
+# `test_support`, so it cannot build without the feature that compiles it, and
+# `cargo build --examples` on a default checkout must not try.
+[[example]]
+name = "synthetic_cover_probe"
+required-features = ["test-utils"]
+
+# The generative-container prototype, for the same reason.
+[[example]]
+name = "generative_stego"
+required-features = ["test-utils"]
+
+# The texture-family survey, which judges candidates with the production gates.
+[[example]]
+name = "container_families"
+required-features = ["test-utils"]
+
+# The scale sweep that turns the hash gate into a design rule.
+[[example]]
+name = "phash_scale_sweep"
+required-features = ["test-utils"]
+
+# Whether one extract can serve both container kinds without leaking which.
+[[example]]
+name = "extract_disambiguation"
+required-features = ["test-utils"]
+
 [features]
 default = []
 # Post-quantum key encapsulation support.

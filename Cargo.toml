@@ -14,8 +14,10 @@ homepage = "https://github.com/stenoxide/stenoxide"
 # dev-dependency that arranges it is a path dependency on this same package,
 # which publishing strips. Shipping tests that cannot compile is worse than
 # shipping none. `scripts` holds the steganalysis harness, which needs a Python
-# toolkit that is not part of the crate.
-exclude = ["tests/*", "scripts/*"]
+# toolkit that is not part of the crate. `examples` holds research harnesses
+# that reach into `test_support` for the same reason the tests do, and are of
+# no use to anyone consuming the library.
+exclude = ["tests/*", "scripts/*", "examples/*"]
 
 # Coverage runs the test profile with instrumentation, and instrumentation is
 # per-codegen-unit: with the default parallel split a line can be attributed to

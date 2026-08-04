@@ -5,18 +5,20 @@ generated around a message and odd-numbered ones around nothing. The two groups
 should be draws from one distribution -- not similar, identical -- so every
 statistic below should separate them at chance.
 
-The interesting statistic is `pair_ratio`. Within a plateau the cover histogram
-is floor(c + N(0, sigma)), whose adjacent bins are *unequal*: for each pair
-(2k, 2k+1) the share landing on the even bin has a value the generator's own
-parameters fix. Any construction that writes bits by pairing values -- LSB
-replacement being the classic -- pulls that share towards one half, because it
-redistributes mass inside a pair while preserving the pair's total. Rejection
-sampling leaves it exactly where the cover put it. So this is the statistic that
-would catch the mistake, which is why it is worth reporting even when it finds
-nothing.
+The interesting statistic is `pair_ratio`. Wherever the texture puts a level,
+the cover histogram around it is floor(c + N(0, sigma)), whose adjacent bins are
+*unequal*: for each pair (2k, 2k+1) the share landing on the even bin takes a
+value the generator's own parameters fix. Any construction that writes bits by
+pairing values -- LSB replacement being the classic -- pulls that share towards
+one half, because it redistributes mass inside a pair while preserving the
+pair's total. Rejection sampling leaves it exactly where the cover put it. So
+this is the statistic that would catch the mistake, which is why it is worth
+reporting even when it finds nothing.
 
-`hcf_com`, `peak_kurt` and `hf_energy` are carried over from
-`informed_detector.py` so the numbers can be read against the embedding path's.
+Every statistic here is deliberately blind to which texture the generator drew.
+An earlier version keyed off the two levels the mosaic generator happened to
+use, which would have gone on reporting numbers -- the wrong numbers -- the
+moment the texture changed.
 """
 
 import sys
@@ -24,16 +26,13 @@ import pathlib
 import numpy as np
 from PIL import Image
 
-PEAKS = (33, 223)
-HALF_WIDTH = 8
+# Occupancy a value pair needs before its ratio is trusted, which is what keeps
+# the sparse tails of the histogram out of the average.
+MIN_PAIR_COUNT = 1000
 
 
 def load(path):
     return np.asarray(Image.open(path).convert("RGB"), dtype=np.int32)
-
-
-def plateau_mask(channel):
-    return (np.abs(channel - PEAKS[0]) <= 10) | (np.abs(channel - PEAKS[1]) <= 10)
 
 
 def hcf_com(channel):
@@ -43,42 +42,52 @@ def hcf_com(channel):
     return float((k * cf[:128]).sum() / cf[:128].sum())
 
 
-def peak_kurtosis(channel):
-    values = channel[plateau_mask(channel)].astype(np.float64)
-    low, high = values < 128, values >= 128
-    centred = np.where(low, values - values[low].mean(), values - values[high].mean())
+def laplacian(channel):
+    c = channel.astype(np.float64)
+    return 4 * c[1:-1, 1:-1] - c[:-2, 1:-1] - c[2:, 1:-1] - c[1:-1, :-2] - c[1:-1, 2:]
+
+
+def residual_kurtosis(channel):
+    """Excess kurtosis of the high-pass residual.
+
+    Taken over the whole frame rather than over the flat parts of one
+    particular texture: the generator's palette is not a constant of this
+    measurement, and a statistic that assumed one would silently measure the
+    wrong pixels the moment the texture changed.
+    """
+    lap = laplacian(channel)
+    centred = lap - lap.mean()
     return float((centred ** 4).mean() / centred.var() ** 2 - 3.0)
 
 
 def hf_energy(channel):
-    c = channel.astype(np.float64)
-    lap = 4 * c[1:-1, 1:-1] - c[:-2, 1:-1] - c[2:, 1:-1] - c[1:-1, :-2] - c[1:-1, 2:]
-    return float(lap[plateau_mask(channel)[1:-1, 1:-1]].var())
+    return float(laplacian(channel).var())
 
 
 def pair_ratio(channel):
     """Mean share of each value pair sitting on the even member.
 
-    Averaged over the pairs of both plateaus, weighted by pair occupancy. A
-    construction that redistributes mass within pairs drives this to 0.5.
+    Averaged over every sufficiently occupied pair, weighted by occupancy. A
+    construction that redistributes mass within pairs drives this to 0.5, so the
+    reported figure is the distance from that balanced state.
     """
     hist = np.bincount(channel.ravel(), minlength=256).astype(np.float64)
-    ratios, weights = [], []
+    even_counts = hist[0::2]
+    odd_counts = hist[1::2]
+    totals = even_counts + odd_counts
 
-    for peak in PEAKS:
-        for even in range(peak - HALF_WIDTH, peak + HALF_WIDTH, 2):
-            even = even - (even % 2)
-            total = hist[even] + hist[even + 1]
-            if total > 1000:
-                ratios.append(hist[even] / total)
-                weights.append(total)
+    # Every sufficiently occupied pair, wherever the texture put its levels.
+    occupied = totals >= MIN_PAIR_COUNT
+    if not occupied.any():
+        return 0.0
 
-    ratios, weights = np.array(ratios), np.array(weights)
+    ratios = even_counts[occupied] / totals[occupied]
+    weights = totals[occupied]
     # Distance from the balanced state, which is what a leak moves towards.
     return float(np.average(np.abs(ratios - 0.5), weights=weights))
 
 
-STATISTICS = (("hcf_com", hcf_com), ("peak_kurt", peak_kurtosis),
+STATISTICS = (("hcf_com", hcf_com), ("res_kurt", residual_kurtosis),
               ("hf_energy", hf_energy), ("pair_ratio", pair_ratio))
 
 
@@ -113,10 +122,13 @@ def main():
         print(f"{name:<12}{a.mean():>14.6f}{b.mean():>14.6f}"
               f"{sd:>12.6f}{d:>12.2f}{overlap:>9}")
 
-    positive_control(directory, images)
+    pooled_sd = float(np.sqrt(
+        (np.array([r['pair_ratio'] for r in loaded]).var(ddof=1)
+         + np.array([r['pair_ratio'] for r in blank]).var(ddof=1)) / 2))
+    positive_control(images, pooled_sd)
 
 
-def positive_control(directory, images):
+def positive_control(images, pooled_sd):
     """Show the test can find what it is looking for.
 
     A null result is worth nothing without knowing the test could have failed.
@@ -148,7 +160,8 @@ def positive_control(directory, images):
     print(f"\npositive control on {blank_path.name}, load factor {load_factor:.2f}")
     print(f"  pair_ratio, sampled conditionally (what we do): {honest:.6f}")
     print(f"  pair_ratio, LSB overwritten (the naive way):    {broken:.6f}")
-    print(f"  the naive construction moves it by {abs(honest - broken) / 0.000132:.0f}"
+    sigmas = abs(honest - broken) / pooled_sd if pooled_sd > 0 else float("inf")
+    print(f"  the naive construction moves it by {sigmas:.0f}"
           f" pooled standard deviations")
     print("\nSo the statistic has the power to convict, and does not.")
 

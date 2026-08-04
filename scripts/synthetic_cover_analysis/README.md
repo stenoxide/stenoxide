@@ -169,16 +169,23 @@ eight around nothing, all validated through the production path:
 - **`stenoxide scan` accepts all sixteen identically**, reporting the same
   ~8.3 KB capacity for a container already holding 1 MB and for one holding
   nothing.
-- **No statistic separates them.** `hcf_com`, `peak_kurt`, `hf_energy` and
-  `pair_ratio` all overlap, separating at 0.33 to 0.71 — which at n=8 per group
+- **No statistic separates them.** `hcf_com`, `res_kurt`, `hf_energy` and
+  `pair_ratio` all overlap, separating at 0.10 to 0.71 — which at n=8 per group
   is what chance looks like.
 
 A null result proves nothing on its own, so `indistinguishability.py` carries a
 positive control. The naive construction — overwrite the LSB rather than sample
 conditioned on it — is applied at the same load factor and measured with the
-same statistic. It moves `pair_ratio` by **434 pooled standard deviations**,
+same statistic. It moves `pair_ratio` by **262 pooled standard deviations**,
 because overwriting redistributes mass within each value pair and flattens the
 cover histogram's natural imbalance. The test can convict, and it does not.
+
+How hard it can convict depends on the texture, though the security does not.
+The statistic feeds on the histogram's natural imbalance, and the mosaic — two
+narrow peaks — has far more of it than `pebbles`, whose levels are spread across
+the range. The same control on `pebbles` containers lands at 15 sigma rather
+than 262. Still a verdict, and worth knowing when reading a null result on a
+texture that has not been checked this way.
 
 ## What this does not fix
 

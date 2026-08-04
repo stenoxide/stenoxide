@@ -164,8 +164,8 @@ can never disagree.
 
 ```markdown
 ### Features
-- **cli**: read the payload from a file — Ada Lovelace ([`0794b7d`](…/commit/0794b7d…))
-- comprehensive test suite with 90% coverage requirement — Ada Lovelace ([`7738f65`](…))
+- **cli**: read the payload from a file — [@ada](https://github.com/ada) ([`0794b7d`](…/commit/0794b7d…))
+- comprehensive test suite with 90% coverage requirement — [@ada](https://github.com/ada) ([`7738f65`](…))
 ```
 
 Three things happen to a commit subject on the way in:
@@ -175,10 +175,24 @@ Three things happen to a commit subject on the way in:
   matching `prompt`, `prompt-9`, `prompt-12` and so on is dropped: it records
   which step of the process produced the change, which means something to
   whoever ran the work and nothing to whoever is reading the release.
-- **The commit is attributed and linked.** Author name, then the abbreviated
-  hash linking to the commit. A line contributed by a squash carries the hash
-  and author of the squash itself — the commits it replaced are not on the
-  branch, so a link to one would resolve to nothing.
+- **The commit is attributed and linked.** The GitHub handle, linked to its
+  profile, then the abbreviated hash linking to the commit. A line contributed
+  by a squash carries the hash and author of the squash itself — the commits it
+  replaced are not on the branch, so a link to one would resolve to nothing.
+
+#### Why the handle and not the name in the commit
+
+`user.name` is whatever the machine that made the commit had configured. It
+identifies nobody in particular, it links nowhere, and one person can appear
+under two spellings in a single release. The handle is an account: it resolves
+to a profile, and it is the name the same person is called by everywhere else in
+the project.
+
+It costs one `gh api repos/…/commits/{sha}` per commit, cached by sha so a
+squash of twenty commits makes one request rather than twenty, and the release
+job passes `GITHUB_TOKEN` for it. The lookup is never fatal: an unlinked email
+address, a missing token or no network leaves the entry crediting the name
+recorded in the commit, and the release still goes out.
 
 ### Overriding the version by hand
 

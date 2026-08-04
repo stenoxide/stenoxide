@@ -79,6 +79,19 @@
 //! wants: it would confirm that the image is a container at all, and turn a
 //! password search into a test with a yes-or-no answer. So extraction prints
 //! one sentence and never says which of the three happened.
+//!
+//! # The one thing extraction says beyond that sentence
+//!
+//! A recovered payload with no `--payload-out` goes to standard output, and a
+//! payload that is binary cannot go to a *terminal*: a Windows console rejects
+//! bytes that are not valid UTF-8, and a Unix terminal would be sprayed with
+//! control codes. So a binary payload bound for a terminal is announced instead
+//! of written. That notice reveals the extraction succeeded — but so does a text
+//! payload printed to the same terminal, and so does any file written under
+//! `--payload-out`; success is inherent in producing the plaintext. The single
+//! sentence still covers the three failures and every post-success write error
+//! on the redirected path, which is all it ever protected. See
+//! [`write_recovered_to_stdout`].
 
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
@@ -669,6 +682,10 @@ fn print_report(report: &EmbedReport, output: &Path) {
 /// file that is not a PNG at all, or that no decoder can read, is not a stego
 /// image anybody could have produced, and saying so reveals nothing an attacker
 /// could not determine by opening the file themselves.
+///
+/// A successful extraction whose binary payload is bound for a terminal returns a
+/// distinct guidance message instead; see [`write_recovered_to_stdout`] for why
+/// that is not the oracle the failure sentence avoids.
 fn run_extract(input: &Path, payload_out: Option<&Path>, force: bool) -> Result<(), String> {
     drop(load_container(input)?);
 
@@ -702,16 +719,7 @@ fn run_extract(input: &Path, payload_out: Option<&Path>, force: bool) -> Result<
     // copy of the plaintext is made that would outlive this function.
     match payload_out {
         Some(path) => write_recovered_file(path, plaintext.as_slice(), force),
-        // Written as raw bytes rather than printed as text: the payload is
-        // whatever the sender put in, and forcing it through a string
-        // conversion would corrupt any message that is not valid UTF-8.
-        None => io::stdout()
-            .write_all(plaintext.as_slice())
-            .and_then(|()| io::stdout().flush())
-            // A broken pipe or a full disk is not a failed extraction, but
-            // naming the difference here would reintroduce the oracle: the same
-            // sentence covers both.
-            .map_err(|_| EXTRACTION_FAILED.to_string()),
+        None => write_recovered_to_stdout(plaintext.as_slice()),
     }
 }
 
@@ -767,6 +775,84 @@ fn write_recovered_file(requested: &Path, plaintext: &[u8], force: bool) -> Resu
 
     payload::write_payload_file(&destination, plaintext, force)
         .map_err(|_| EXTRACTION_FAILED.to_string())
+}
+
+/// What extraction should do with a recovered payload bound for standard output.
+#[derive(Debug, PartialEq, Eq)]
+enum StdoutDelivery {
+    /// Write the bytes to standard output unchanged.
+    Raw,
+    /// Refuse: the payload is binary and standard output is a terminal.
+    RefuseBinary,
+}
+
+/// Decides how a recovered payload reaches standard output.
+///
+/// The bytes go out raw whenever standard output is **not** a terminal — a
+/// redirection or a pipe takes binary and text alike, and that path must never
+/// change, because it is the whole way a binary payload is captured
+/// (`extract > payload.bin`). Only a payload that is *both* binary *and* bound
+/// for an interactive terminal is refused: a terminal cannot render it. On
+/// Windows the console rejects bytes that are not valid UTF-8 outright — the
+/// write fails, which is the bug this function exists to turn into a clear
+/// message — and on a Unix terminal the same bytes would reset colours, move the
+/// cursor and ring the bell.
+///
+/// "Binary" is "not valid UTF-8", the same test [`payload::detect_extension`]
+/// draws between a `txt` and a `bin` payload, so the two agree on what counts as
+/// text.
+fn stdout_delivery(stdout_is_terminal: bool, plaintext: &[u8]) -> StdoutDelivery {
+    if stdout_is_terminal && std::str::from_utf8(plaintext).is_err() {
+        StdoutDelivery::RefuseBinary
+    } else {
+        StdoutDelivery::Raw
+    }
+}
+
+/// Writes a recovered payload to standard output, or explains why it will not.
+///
+/// Two destinations wear the same file descriptor and are not served the same
+/// way, as in [`read_plaintext`]:
+///
+/// - **A pipe or a redirection.** `extract > payload.bin`, or a pipe into
+///   another program. Every byte matters and the payload goes out raw whatever
+///   it contains. A write that fails here — a broken pipe, a full disk — folds
+///   into [`EXTRACTION_FAILED`] like every other post-success write error, so it
+///   cannot become an admission that the password was right.
+///
+/// - **A terminal.** A person is watching. A text payload is shown; a binary one
+///   is announced rather than dumped, with the two ways to capture it, for the
+///   reasons in [`stdout_delivery`].
+///
+/// # Why the terminal notice is not the oracle the failure sentence avoids
+///
+/// The notice reveals that extraction succeeded — but a text payload shown on
+/// the same terminal reveals exactly as much, and so does a file that appears
+/// under `--payload-out` or a redirection. Success is inherent in producing the
+/// plaintext and cannot be hidden from whoever runs the command. What the single
+/// [`EXTRACTION_FAILED`] sentence hides is *which* of the three failures happened
+/// and whether a post-success *write* failed on the redirected path; the notice
+/// is a refusal decided *before* any write and touches neither.
+///
+/// # Errors
+///
+/// Returns [`EXTRACTION_FAILED`] when the raw write fails, and the binary-payload
+/// guidance when standard output is a terminal the payload cannot be shown on.
+fn write_recovered_to_stdout(plaintext: &[u8]) -> Result<(), String> {
+    match stdout_delivery(io::stdout().is_terminal(), plaintext) {
+        // The payload is whatever the sender put in, written as raw bytes rather
+        // than through a string conversion that would corrupt anything not valid
+        // UTF-8.
+        StdoutDelivery::Raw => io::stdout()
+            .write_all(plaintext)
+            .and_then(|()| io::stdout().flush())
+            .map_err(|_| EXTRACTION_FAILED.to_string()),
+        StdoutDelivery::RefuseBinary => Err(format!(
+            "The payload is {} bytes of binary data and will not be written to the terminal.\n       \
+             Redirect it to a file (for example: > payload.bin) or pass --payload-out PATH.",
+            plaintext.len()
+        )),
+    }
 }
 
 /// Payload bytes `image` can carry, after encryption.
@@ -978,6 +1064,50 @@ mod tests {
             refuse_existing_destination(&taken).expect_err("an existing file must be refused");
         assert!(message.contains("taken.zip"), "got: {message}");
         assert!(message.contains("--force"), "got: {message}");
+    }
+
+    /// A redirection or a pipe takes binary and text alike.
+    ///
+    /// The path a binary payload is captured through — `extract > payload.bin` —
+    /// and the one that must never start sniffing content, because its consumer
+    /// is a file or another program that asked for every byte.
+    #[test]
+    fn a_redirection_takes_binary_and_text_alike() {
+        assert_eq!(stdout_delivery(false, b"plain text"), StdoutDelivery::Raw);
+        assert_eq!(
+            stdout_delivery(false, &[0xFF, 0xD8, 0xFF, 0xE0]),
+            StdoutDelivery::Raw,
+            "a redirection must take a JPEG's bytes unchanged"
+        );
+    }
+
+    /// A terminal shows text and refuses binary.
+    ///
+    /// The bug this fixes: a JPEG begins `FF D8 FF`, which is invalid UTF-8, and
+    /// a Windows console cannot be handed it — the write fails and the extraction
+    /// looks like it failed when it did not.
+    #[test]
+    fn a_terminal_shows_text_but_refuses_binary() {
+        assert_eq!(
+            stdout_delivery(true, b"a readable message"),
+            StdoutDelivery::Raw
+        );
+        assert_eq!(
+            stdout_delivery(true, &[0xFF, 0xD8, 0xFF, 0xE0]),
+            StdoutDelivery::RefuseBinary
+        );
+    }
+
+    /// Accented text is still text on a terminal.
+    ///
+    /// The binary test is UTF-8 validity, not ASCII, so a message with accents
+    /// is shown rather than refused.
+    #[test]
+    fn accented_text_is_shown_on_a_terminal() {
+        assert_eq!(
+            stdout_delivery(true, "café — ñandú".as_bytes()),
+            StdoutDelivery::Raw
+        );
     }
 
     /// The guidance names the terminator it expects.

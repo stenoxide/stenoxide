@@ -103,7 +103,8 @@ use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap_complete::aot::{generate, Shell};
 use zeroize::Zeroizing;
 
 use stenoxide_core::cost::hill::HillCostProvider;
@@ -113,7 +114,7 @@ use stenoxide_core::generate::{
     MIN_CONTAINER_SIDE,
 };
 use stenoxide_core::image_io::buffer::ImageBuffer;
-use stenoxide_core::image_io::phash::compute_stable_phash;
+use stenoxide_core::image_io::phash::{compute_stable_phash, PHashError};
 use stenoxide_core::image_io::validate::{load_and_validate, ValidationError};
 use stenoxide_core::pipeline::{EmbedPipeline, EmbedReport, PipelineError};
 use stenoxide_core::stego::sizer::{compute_capacity, EmbeddingMode, SizerError};
@@ -166,6 +167,20 @@ It does not hide that the container was generated. It looks like a synthetic
 texture, and a folder full of them is itself the thing worth explaining. Prefer
 a photograph of your own that has never been published, whenever you have one.";
 
+/// The line `embed` adds when it refuses the photograph it was given.
+///
+/// The same pointer `scan` prints when it accepts nothing, from the other side:
+/// there, a user who looked is told that `generate` exists; here, a user who
+/// picked one file straight away is told that there is a way to find out which
+/// of the others would have worked. It is offered only by `embed`, because it
+/// answers a question only that user is asking — see [`describe_embed_rejection`].
+///
+/// The leading newline and seven spaces are the continuation indent every
+/// multi-line message in this file already uses, so the advice lines up under
+/// the sentence it belongs to rather than under `Error:`.
+const ANOTHER_CONTAINER_HINT: &str = "\n       \
+     stenoxide scan <folder> reports which of your other photos can be used.";
+
 /// What the user is told before they are expected to type a message.
 ///
 /// Plain ASCII on purpose: this is printed before anything else knows whether
@@ -176,9 +191,37 @@ Message to hide. It may span as many lines as you need.
 Finish with a line containing a single dot:  .
 ";
 
+/// The whole of what `stenoxide --help` prints.
+///
+/// `clap` replaces rather than extends: the moment `long_about` has content it
+/// becomes the entire body of the long help, and the sentence `about` carries
+/// would simply vanish from it. So that sentence opens this text — read from the
+/// manifest, the same place `about` reads it, rather than copied where the two
+/// could drift apart — and the examples follow. The short help is untouched and
+/// still prints that one sentence alone.
+///
+/// What the examples add is the one thing the list of commands underneath
+/// cannot: the order. A reader sees four verbs and no indication that `scan`
+/// comes first and `extract` last.
+///
+/// `completions` and `man` are deliberately left out. They are installation
+/// utilities rather than steps of the flow, they are already visible in the list
+/// clap prints below, and naming them here would dilute the only thing this text
+/// exists to say.
+const CLI_LONG_ABOUT: &str = concat!(
+    env!("CARGO_PKG_DESCRIPTION"),
+    "\n\n",
+    "Find a photograph that can hold a message, hide one in it, read it back:\n\n",
+    "  stenoxide scan ./photos\n",
+    "  stenoxide embed --input photo.png --output stego.png\n",
+    "  stenoxide extract --input stego.png\n\n",
+    "When none of the photographs can be used, stenoxide generate builds a\n",
+    "container around the message instead."
+);
+
 /// Hide encrypted messages inside lossless images.
 #[derive(Parser)]
-#[command(name = "stenoxide", version, about, long_about = None)]
+#[command(name = "stenoxide", version, about, long_about = CLI_LONG_ABOUT)]
 struct Cli {
     /// Operation to perform.
     #[command(subcommand)]
@@ -193,8 +236,9 @@ enum Command {
     Scan(ScanArgs),
     /// Hide a message, read from standard input, inside a PNG container.
     Embed {
-        /// Container image. Must be a PNG of at least 2000x2000 pixels that has
-        /// never been JPEG-compressed.
+        /// Container image: the photo the message is hidden inside. Must be a
+        /// PNG of at least 2000x2000 pixels that has never been
+        /// JPEG-compressed.
         #[arg(long, value_name = "PATH")]
         input: PathBuf,
         /// Where to write the resulting stego image. Always written as PNG.
@@ -235,15 +279,42 @@ enum Command {
         /// The stego image to read.
         #[arg(long, value_name = "PATH")]
         input: PathBuf,
-        /// Where to write the recovered payload. Written to standard output
-        /// when absent. A directory receives a file named after the type of
-        /// the content; a path without an extension is given one.
+        /// Where to write the recovered payload, the hidden file or message.
+        /// Written to standard output when absent. A directory receives a file
+        /// named after the type of the content; a path without an extension is
+        /// given one.
         #[arg(long, value_name = "PATH")]
         payload_out: Option<PathBuf>,
         /// Overwrite the output file if it already exists.
         #[arg(long, requires = "payload_out")]
         force: bool,
     },
+    /// Write a shell completion script to standard output.
+    ///
+    /// The script and nothing else, so that it can be sourced directly —
+    /// `source <(stenoxide completions bash)` — or saved wherever the shell
+    /// looks for its completions.
+    Completions {
+        /// Shell the script is written for.
+        #[arg(value_name = "SHELL", value_enum)]
+        shell: Shell,
+    },
+    /// Write the manual page to standard output.
+    ///
+    /// The roff source of `stenoxide.1`, for a packager to redirect into a
+    /// file: `stenoxide man > stenoxide.1`. It is produced at run time rather
+    /// than by a build script because a build script compiles as a separate
+    /// crate and cannot see the command definition it would have to describe.
+    ///
+    /// # Why there is one page and not one per subcommand
+    ///
+    /// The page rendered is the root command, whose SUBCOMMANDS section lists
+    /// every verb with its summary. Separate `stenoxide-embed.1` style pages
+    /// are deliberately not produced, and this subcommand takes no argument
+    /// asking for one: a single page is what `man stenoxide` finds, and it is
+    /// the whole of what this tool needs to document. The absence is a
+    /// decision, not an oversight.
+    Man,
 }
 
 /// Everything `stenoxide scan` accepts.
@@ -285,6 +356,8 @@ fn main() -> ExitCode {
             payload_out,
             force,
         } => run_extract(input, payload_out.as_deref(), *force),
+        Command::Completions { shell } => run_completions(*shell),
+        Command::Man => run_man(),
     };
 
     match outcome {
@@ -436,6 +509,17 @@ fn load_container(path: &Path) -> Result<ImageBuffer, String> {
     load_and_validate(path).map_err(|error| describe_rejection(path, &error))
 }
 
+/// Loads a container for `embed`, which has one more thing to say than
+/// [`load_container`].
+///
+/// # Errors
+///
+/// Returns the message to print, already phrased for a terminal; see
+/// [`describe_embed_rejection`].
+fn load_container_for_embed(path: &Path) -> Result<ImageBuffer, String> {
+    load_and_validate(path).map_err(|error| describe_embed_rejection(path, &error))
+}
+
 /// Turns a validation failure into advice.
 ///
 /// The layer that refused says what is wrong with the file, which is the right
@@ -499,6 +583,37 @@ fn describe_rejection(path: &Path, error: &ValidationError) -> String {
     }
 }
 
+/// The rejection as `embed` reports it: [`describe_rejection`], plus a way to
+/// find a container that would work.
+///
+/// A layer above that function rather than a change to it, because the very
+/// same text serves `extract` — [`load_container`] is called by both — and there
+/// the advice would answer a question nobody asked. Whoever runs `extract` was
+/// handed one particular image and is trying to recover what is in it; they are
+/// not looking through a folder for a better photograph, and `scan` has nothing
+/// to offer them.
+///
+/// Only the refusals that are about *this image* are extended. A file that
+/// cannot be read, or whose PNG stream is malformed, is a broken file rather
+/// than a wrong choice of photograph: that user needs their file back, not a
+/// different one, and pointing them at `scan` would be changing the subject.
+fn describe_embed_rejection(path: &Path, error: &ValidationError) -> String {
+    let message = describe_rejection(path, error);
+
+    match error {
+        ValidationError::JpegDetected
+        | ValidationError::WebpDetected
+        | ValidationError::NotPng
+        | ValidationError::ImageTooSmall { .. }
+        | ValidationError::ImageTooLarge { .. }
+        | ValidationError::UnsupportedColorSpace { .. }
+        | ValidationError::JpegArtifactsDetected { .. } => {
+            format!("{message}{ANOTHER_CONTAINER_HINT}")
+        }
+        ValidationError::IoError(_) | ValidationError::DecodingError(_) => message,
+    }
+}
+
 /// Runs the embedding path.
 ///
 /// # Errors
@@ -511,7 +626,7 @@ fn describe_rejection(path: &Path, error: &ValidationError) -> String {
 fn run_embed(input: &Path, output: &Path, payload: Option<&Path>) -> Result<(), String> {
     // Before anything is asked of the user: a container that will be refused is
     // refused now, rather than after a passphrase has been typed for nothing.
-    drop(load_container(input)?);
+    drop(load_container_for_embed(input)?);
 
     // And for the same reason, a payload path that cannot be read is settled
     // here too — a mistyped path is exactly as much a wasted passphrase as a
@@ -564,28 +679,39 @@ fn run_embed(input: &Path, output: &Path, payload: Option<&Path>) -> Result<(), 
 /// message says so. Reporting the file's size instead would tell a user that
 /// their 30 KB of notes do not fit in a container that admits 22 KB, which is
 /// false: Zstandard runs first, and text collapses.
+///
+/// Two other refusals are left in the words their own layer wrote and given the
+/// pointer at `scan` that [`describe_embed_rejection`] adds, for the same
+/// reason: a container too smooth to hide anything in, and one whose perceptual
+/// hash will not survive the embedding, are both verdicts on this photograph and
+/// on no other. They arrive here rather than at the validation gate because
+/// neither can be decided without analysing every pixel. This function is
+/// reached only from `run_embed`, so the pointer stays out of `extract` as it
+/// does there.
 fn describe_embed_failure(error: &PipelineError) -> String {
-    let PipelineError::Sizer(SizerError::PayloadTooLarge {
-        payload,
-        available,
-        deficit,
-    }) = error
-    else {
-        return format!("Error: {error}");
-    };
-
-    format!(
-        "Error: the payload does not fit in this container.\n       \
-         Compressed and encrypted it is {payload} bytes; the container admits \
-         {available}.\n       \
-         It is {deficit} bytes over.\n       \
-         That first figure is the payload after compression, not the size of \
-         the file:\n       \
-         text shrinks a great deal, so a much larger file may still fit and a \
-         smaller one may not.\n       \
-         Use a container of higher resolution; stenoxide scan reports what each \
-         one can carry."
-    )
+    match error {
+        PipelineError::Sizer(SizerError::PayloadTooLarge {
+            payload,
+            available,
+            deficit,
+        }) => format!(
+            "Error: the payload does not fit in this container.\n       \
+             Compressed and encrypted it is {payload} bytes; the container \
+             admits {available}.\n       \
+             It is {deficit} bytes over.\n       \
+             That first figure is the payload after compression, not the size \
+             of the file:\n       \
+             text shrinks a great deal, so a much larger file may still fit and \
+             a smaller one may not.\n       \
+             Use a container of higher resolution; stenoxide scan reports what \
+             each one can carry."
+        ),
+        PipelineError::Cost(_)
+        | PipelineError::PHash(PHashError::InsufficientStability { .. }) => {
+            format!("Error: {error}.{ANOTHER_CONTAINER_HINT}")
+        }
+        other => format!("Error: {other}"),
+    }
 }
 
 /// Runs the generative path.
@@ -939,6 +1065,81 @@ fn write_recovered_to_stdout(plaintext: &[u8]) -> Result<(), String> {
     }
 }
 
+/// Writes the completion script for `shell` to standard output.
+///
+/// # Errors
+///
+/// Returns the message to print when standard output cannot be written.
+fn run_completions(shell: Shell) -> Result<(), String> {
+    write_artifact(&completion_script(shell), "completion script")
+}
+
+/// The completion script for `shell`, as the bytes that make it up.
+///
+/// Rendered into memory rather than straight onto standard output for two
+/// reasons. The generator writes through an interface that cannot report a
+/// failure, so a closed pipe would end the process on its terms rather than on
+/// this program's; and a buffer is something a test can read back, which a
+/// console is not.
+fn completion_script(shell: Shell) -> Vec<u8> {
+    let mut command = Cli::command();
+    let name = command.get_name().to_string();
+    let mut script = Vec::new();
+
+    generate(shell, &mut command, name, &mut script);
+
+    script
+}
+
+/// Writes the manual page to standard output.
+///
+/// # Errors
+///
+/// Returns the message to print when the page cannot be rendered or standard
+/// output cannot be written.
+fn run_man() -> Result<(), String> {
+    write_artifact(&manual_page()?, "manual page")
+}
+
+/// The roff source of `stenoxide.1`, as the bytes that make it up.
+///
+/// One page, for the root command; see the `man` subcommand for why there is no
+/// page per subcommand.
+///
+/// # Errors
+///
+/// Returns the message to print when the renderer fails, which for a buffer in
+/// memory it cannot — the case is carried rather than discarded so that no
+/// failure of the layer below is swallowed here.
+fn manual_page() -> Result<Vec<u8>, String> {
+    let mut page = Vec::new();
+
+    clap_mangen::Man::new(Cli::command())
+        .render(&mut page)
+        .map_err(|err| format!("Error: could not render the manual page: {err}"))?;
+
+    Ok(page)
+}
+
+/// Writes a generated artifact to standard output, and nothing besides it.
+///
+/// No banner, no progress line, no blank line of courtesy. What is written here
+/// is read by a shell being asked to source it or by a packager's redirection
+/// into a `.1` file, and a single byte of this program's own would break the
+/// first and corrupt the second. Only the failure speaks, and it speaks on
+/// stderr like everything else addressed to a person.
+///
+/// # Errors
+///
+/// Returns the message to print when standard output cannot be written, naming
+/// `what` was being written.
+fn write_artifact(bytes: &[u8], what: &str) -> Result<(), String> {
+    io::stdout()
+        .write_all(bytes)
+        .and_then(|()| io::stdout().flush())
+        .map_err(|err| format!("Error: could not write the {what}: {err}"))
+}
+
 /// Payload bytes `image` can carry, after encryption.
 ///
 /// `None` when a layer above the loader refuses the container, which is a
@@ -1008,6 +1209,9 @@ fn console_output_code_page() -> u32 {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
+
+    use clap::ValueEnum;
+    use stenoxide_core::cost::hill::CostError;
 
     use super::*;
 
@@ -1126,6 +1330,119 @@ mod tests {
         let message = describe_embed_failure(&error);
 
         assert_eq!(message, format!("Error: {error}"));
+    }
+
+    /// A container refused for this image alone points at `scan`.
+    ///
+    /// Every rejection that says something about *this photograph* — its
+    /// format, its size, its pixel layout, the JPEG grid in it — is a rejection
+    /// the user answers by choosing a different one, and `scan` is how they find
+    /// which of theirs would do. The reason the whole list is pinned rather than
+    /// one case: the hint is added per variant, so a variant left out is a user
+    /// who reaches the same dead end through a different door.
+    #[test]
+    fn a_rejected_photograph_is_pointed_at_scan() {
+        let path = Path::new("photo.png");
+        let rejections = [
+            ValidationError::JpegDetected,
+            ValidationError::WebpDetected,
+            ValidationError::NotPng,
+            ValidationError::ImageTooSmall {
+                width: 800,
+                height: 600,
+                min: 2_000,
+            },
+            ValidationError::ImageTooLarge {
+                width: 20_000,
+                height: 20_000,
+                pixels: 400_000_000,
+                max: 134_217_728,
+            },
+            ValidationError::UnsupportedColorSpace {
+                found: "Rgb32F".to_owned(),
+            },
+            ValidationError::JpegArtifactsDetected { ratio: 1.8 },
+        ];
+
+        for error in &rejections {
+            let message = describe_embed_rejection(path, error);
+
+            assert!(
+                message.contains("stenoxide scan"),
+                "{error:?} must point at scan, got: {message}"
+            );
+            // The advice is added to the existing explanation, never in place
+            // of it: the user still has to be told what was wrong with the file.
+            assert!(
+                message.starts_with(&describe_rejection(path, error)),
+                "the original explanation must survive, got: {message}"
+            );
+        }
+    }
+
+    /// A file that is broken is not told to go and find another one.
+    ///
+    /// The distinction the hint rests on: a missing file and a malformed PNG are
+    /// problems with the file itself, and a user whose disk failed mid-copy is
+    /// not choosing between photographs.
+    #[test]
+    fn a_broken_file_is_not_pointed_at_scan() {
+        let path = Path::new("photo.png");
+        let broken = [
+            ValidationError::IoError(io::Error::new(io::ErrorKind::NotFound, "no such file")),
+            ValidationError::DecodingError("truncated stream".to_owned()),
+        ];
+
+        for error in &broken {
+            let message = describe_embed_rejection(path, error);
+
+            assert_eq!(
+                message,
+                describe_rejection(path, error),
+                "{error:?} must be reported exactly as it always was"
+            );
+        }
+    }
+
+    /// Extraction reports a rejected image exactly as it always did.
+    ///
+    /// The hint belongs to `embed` alone. Somebody running `extract` was given
+    /// one image and wants what is inside it; telling them to scan a folder for
+    /// a better photograph would answer a question they did not ask, which is
+    /// why the advice is a layer above the shared description rather than in it.
+    #[test]
+    fn extraction_keeps_the_plain_rejection() {
+        let path = Path::new("stego.png");
+        let message = describe_rejection(path, &ValidationError::NotPng);
+
+        assert!(
+            !message.contains("stenoxide scan"),
+            "the shared description must stay free of the embed hint, got: {message}"
+        );
+    }
+
+    /// A container too smooth, or too unstable, to embed in points at `scan`.
+    ///
+    /// These two refusals arrive after the analysis rather than at the door,
+    /// because neither can be decided without reading every pixel — but they say
+    /// the same thing as the rejections above: this photograph will not do. The
+    /// sentence the layer wrote is kept in full; only the way out is added.
+    #[test]
+    fn an_untextured_container_is_pointed_at_scan() {
+        let smooth = PipelineError::Cost(CostError::ExcessiveSmoothRegions { ratio: 0.42 });
+        let message = describe_embed_failure(&smooth);
+
+        assert!(message.contains("too smooth"), "got: {message}");
+        assert!(message.contains("stenoxide scan"), "got: {message}");
+
+        let unstable = PipelineError::PHash(PHashError::InsufficientStability {
+            unstable_bits: 3,
+            threshold: 0.05,
+        });
+        let message = describe_embed_failure(&unstable);
+
+        assert!(message.contains("perceptually unstable"), "got: {message}");
+        assert!(message.contains("stenoxide scan"), "got: {message}");
     }
 
     /// An oversized generated payload is told the numbers and a size to reach.
@@ -1254,6 +1571,127 @@ mod tests {
         assert_eq!(
             stdout_delivery(true, "café — ñandú".as_bytes()),
             StdoutDelivery::Raw
+        );
+    }
+
+    /// Every shell the generator supports produces a script.
+    ///
+    /// The list is walked rather than spelled out, so that a shell added by a
+    /// future release of the generator is covered the day it appears.
+    #[test]
+    fn every_supported_shell_gets_a_script() {
+        for shell in Shell::value_variants() {
+            let script = completion_script(*shell);
+
+            assert!(!script.is_empty(), "{shell} produced no completion script");
+        }
+    }
+
+    /// The manual page carries the title macro every man page opens with.
+    ///
+    /// A cheap guard against the failure that would matter: anything printed to
+    /// standard output that is not the page itself ends up inside the `.1` file
+    /// a packager redirects, and a message would be as invisible there as it is
+    /// obvious here. The macro is looked for rather than required at the very
+    /// start of the file because the renderer emits the two-line apostrophe
+    /// definition every roff page carries ahead of it.
+    #[test]
+    fn the_manual_page_is_roff() {
+        let page = manual_page().expect("a page rendered into memory cannot fail");
+        let page = String::from_utf8(page).expect("the page is UTF-8");
+
+        assert!(page.contains(".TH stenoxide 1"), "no title macro in: {page}");
+        assert!(page.contains(".SH NAME"), "no name section in: {page}");
+    }
+
+    /// Nothing precedes the artifact on standard output.
+    ///
+    /// The direct check of the rule these two subcommands exist under: the very
+    /// first line is already the script or the page. A banner, or a blank line
+    /// of courtesy, would break `source <(stenoxide completions bash)` and
+    /// corrupt a redirected manual page — and would pass every other test here.
+    #[test]
+    fn the_first_line_is_already_the_artifact() {
+        let script = completion_script(Shell::Bash);
+        let script = String::from_utf8(script).expect("the script is UTF-8");
+        let first = script.lines().next().unwrap_or_default();
+
+        assert!(
+            first.starts_with('#') || first.starts_with('_'),
+            "a bash script opens with a comment or a function, got: {first:?}"
+        );
+
+        let page = manual_page().expect("a page rendered into memory cannot fail");
+        let page = String::from_utf8(page).expect("the page is UTF-8");
+        let first = page.lines().next().unwrap_or_default();
+
+        assert!(
+            first.starts_with('.'),
+            "a roff page opens with a control line, got: {first:?}"
+        );
+    }
+
+    /// The command definition still parses every argument it used to.
+    ///
+    /// Two subcommands were added beside the four that do the work; this pins
+    /// that they were added and nothing was disturbed — the flags of `embed`
+    /// and `extract` keep their names, and the definition itself stays
+    /// internally consistent, which is what `debug_assert` on a `clap` command
+    /// checks.
+    #[test]
+    fn the_existing_arguments_are_untouched() {
+        Cli::command().debug_assert();
+
+        let cli = Cli::try_parse_from([
+            "stenoxide",
+            "embed",
+            "--input",
+            "cover.png",
+            "--output",
+            "stego.png",
+            "--payload",
+            "secret.zip",
+        ])
+        .expect("the embed arguments must keep parsing");
+
+        assert!(
+            matches!(
+                cli.command,
+                Command::Embed { input, output, payload }
+                    if input == Path::new("cover.png")
+                        && output == Path::new("stego.png")
+                        && payload.as_deref() == Some(Path::new("secret.zip"))
+            ),
+            "embed must still parse into the same three paths"
+        );
+    }
+
+    /// The long help opens with the short one and names the four verbs in order.
+    ///
+    /// Two failures this guards against, both invisible until someone runs the
+    /// binary. Dropping the description would silently remove it from
+    /// `--help` — `clap` replaces the short text with the long one rather than
+    /// printing both — and rewording the examples until a verb disappears would
+    /// leave the flow half-explained, which is the whole reason the text exists.
+    #[test]
+    fn the_long_help_opens_with_the_short_one() {
+        assert!(
+            CLI_LONG_ABOUT.starts_with(env!("CARGO_PKG_DESCRIPTION")),
+            "the long help must open with the sentence -h prints, got: {CLI_LONG_ABOUT}"
+        );
+
+        for verb in ["scan", "embed", "extract", "generate"] {
+            assert!(
+                CLI_LONG_ABOUT.contains(&format!("stenoxide {verb}")),
+                "the flow must still name {verb}, got: {CLI_LONG_ABOUT}"
+            );
+        }
+
+        // The two installation utilities stay out: they are not steps of the
+        // flow, and the list of commands clap prints below already has them.
+        assert!(
+            !CLI_LONG_ABOUT.contains("completions") && !CLI_LONG_ABOUT.contains("stenoxide man"),
+            "the quickstart is about the four verbs only, got: {CLI_LONG_ABOUT}"
         );
     }
 

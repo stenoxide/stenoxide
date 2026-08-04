@@ -54,16 +54,25 @@ it goes.
 
 | Step | What it guarantees | `main` | `stable` |
 |------|--------------------|:------:|:--------:|
-| `cargo test --workspace` | The unit and integration suites pass. | yes | yes |
 | `cargo clippy --workspace -- -D warnings` | No lint warning survives. | yes | yes |
+| `cargo test --workspace` | The unit and integration suites pass. | no | yes |
+| `cargo llvm-cov --fail-under-lines 90` | Line coverage of the workspace stays at or above 90%. | no | yes |
 | `cargo audit` | No dependency carries a known advisory. | no | yes |
 | `cargo publish --workspace --dry-run` | Both crates package cleanly and would upload. | no | yes |
 
-The last two are release concerns, not correctness ones: an advisory or a
-packaging defect matters at the moment something is published, and running them
-on every feature branch costs a `cargo install cargo-audit` and a full package
-verification for no decision they could change. A pull request into `stable`
-runs them, and that is the merge that publishes.
+Only clippy runs on the way into `main`, and that is a budget decision. The
+suite, the coverage run and the `cargo install cargo-llvm-cov` that precedes it
+took roughly fifteen minutes of Actions time per pull request, against the 2,000
+free minutes a month the repository gets. Nothing is published from `main`, and
+every commit that reaches `stable` passes through this same job with all of it
+switched on, so the checks are not lost — they move to the merge where the
+answer decides something. Run `cargo test` locally while you work; treat a green
+`main` check as "it lints", not "it is proven".
+
+The last two are release concerns rather than correctness ones, and they are
+skipped on `main` for a second reason: an advisory or a packaging defect matters
+at the moment something is published. A pull request into `stable` runs them,
+and that is the merge that publishes.
 
 The publish check runs once for the whole workspace instead of once per crate.
 Packaging `stenoxide-cli` alone makes cargo look up `stenoxide-core` on
@@ -259,7 +268,7 @@ neither of which can be taken back.
 | Rule | Why |
 |------|-----|
 | Pull request required, squash only | Nothing reaches the published line without a merge that the release job can read. |
-| **Test and validate** must pass | The tests, clippy, the coverage floor, `cargo audit` and the packaging dry run. |
+| **Test and validate** must pass | Clippy, the tests, the coverage floor, `cargo audit` and the packaging dry run — the full job, which only a `stable` target gets. |
 | **Pull request title** must pass | The title is the fallback subject a squash lands with. |
 | Branch must be up to date | The checks ran against what will actually be on `stable`. |
 | No force push, no deletion | The tags and the published history stay where they are. |
@@ -290,7 +299,7 @@ enforces:
 
 | Rule | Why |
 |------|-----|
-| **Test and validate** must pass | The tests, clippy and the coverage floor. The release-only steps are skipped for a `main` target, so this is the correctness half of the same job. |
+| **Test and validate** must pass | Clippy. The tests, the coverage floor and the release steps are all skipped for a `main` target, so this gate says the branch lints — the proof arrives at the promotion to `stable`. |
 | **Pull request title** must pass | The title is the fallback subject a squash lands with, and what the next promotion to `stable` reads. |
 | No force push, no deletion | The history a merged pull request was checked against stays where it is. |
 

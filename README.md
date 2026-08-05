@@ -175,11 +175,19 @@ $ stenoxide embed --input photo.png --output stego.png
 Password:
 Message to hide. It may span as many lines as you need.
 Finish with a line containing a single dot:  .
+A line you have sent cannot be edited; to revise one first, put the message in
+a file and pass it with -p.
 Meet me at six.
 Bring the other half.
 .
 Read 38 bytes.
 ```
+
+There is no line editor here, and the arrow keys will not bring back the line
+above — they reach the console's own editor, which recalls your shell history.
+That is deliberate: every line editor worth having keeps a history, and a
+history is somewhere the message could end up written down. Write it in a file
+and pass it with `-p` when you want to revise it first.
 
 Typing it is the more private of the two: a message given to `echo` is a
 command line like any other and stays in the shell's history, while nothing

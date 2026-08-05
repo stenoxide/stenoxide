@@ -186,9 +186,28 @@ const ANOTHER_CONTAINER_HINT: &str = "\n       \
 /// Plain ASCII on purpose: this is printed before anything else knows whether
 /// the console can render a nicer mark, and a guidance line that arrives as a
 /// row of question marks would defeat its own point.
+///
+/// # Why it says a submitted line cannot be edited
+///
+/// Because the arrow keys look as though they should. They reach the console's
+/// own line editor, which recalls what was typed at the *shell* — so a user
+/// trying to correct the line above finds a command from their history where
+/// their message was, and no way back to it. Saying so costs one line and is
+/// cheaper than discovering it halfway through a message.
+///
+/// # Why there is no line editor here
+///
+/// Every candidate worth taking brings a history with it, and a history is a
+/// place the secret message can end up written down, in memory or on disk. That
+/// is the same surface the password and the message avoid by never being
+/// arguments. The way to revise a message before hiding it is to write it in a
+/// file, which is what the flag named below is for — `-p` in both subcommands
+/// that read a typed message, where the long forms differ.
 const TYPING_GUIDANCE: &str = "\
 Message to hide. It may span as many lines as you need.
 Finish with a line containing a single dot:  .
+A line you have sent cannot be edited; to revise one first, put the message in
+a file and pass it with -p.
 ";
 
 /// The whole of what `stenoxide --help` prints.
@@ -1192,12 +1211,39 @@ fn write_recovered_to_stdout(plaintext: &[u8]) -> Result<(), String> {
             .write_all(plaintext)
             .and_then(|()| io::stdout().flush())
             .map_err(|_| EXTRACTION_FAILED.to_string()),
-        StdoutDelivery::RefuseBinary => Err(format!(
-            "The payload is {} bytes of binary data and will not be written to the terminal.\n       \
-             Redirect it to a file (for example: > payload.bin) or pass --payload-out PATH.",
-            plaintext.len()
-        )),
+        StdoutDelivery::RefuseBinary => Err(binary_payload_notice(plaintext)),
     }
+}
+
+/// The notice a binary payload bound for a terminal gets instead of its bytes.
+///
+/// It names the type, because the program already knows it:
+/// [`payload::detect_extension`] is what puts a name on the file written under
+/// `--payload-out`, and reading it here costs nothing and turns "binary data,
+/// try `> payload.bin`" into an example the user can paste. Nothing new is
+/// revealed by it — by this line the extraction has already succeeded and the
+/// plaintext is in the caller's hands; see [`write_recovered_to_stdout`] for why
+/// that is not the oracle the single failure sentence avoids.
+///
+/// Both ways of capturing the payload are kept, in the same order they were
+/// offered in: naming the type is an improvement to the example, not a
+/// replacement for the advice.
+fn binary_payload_notice(plaintext: &[u8]) -> String {
+    let extension = payload::detect_extension(plaintext);
+
+    // `bin` is the table's way of saying it recognised nothing, so there is no
+    // type to name and the sentence keeps the words it always used.
+    let described = if extension == payload::BINARY_EXTENSION {
+        "binary data".to_owned()
+    } else {
+        format!("{} data", extension.to_uppercase())
+    };
+
+    format!(
+        "The payload is {} bytes of {described} and will not be written to the terminal.\n       \
+         Redirect it to a file (for example: > payload.{extension}) or pass --payload-out PATH.",
+        plaintext.len()
+    )
 }
 
 /// Writes the completion script for `shell` to standard output.
@@ -2083,6 +2129,56 @@ mod tests {
         assert!(
             !CLI_LONG_ABOUT.contains("completions") && !CLI_LONG_ABOUT.contains("stenoxide man"),
             "the quickstart is about the four verbs only, got: {CLI_LONG_ABOUT}"
+        );
+    }
+
+    /// The notice names the type it recognised, and offers it as the extension.
+    ///
+    /// The program already knew: the same table names the file written under
+    /// `--payload-out`. Saying "binary data" and suggesting `payload.bin` for a
+    /// ZIP was throwing away an answer it had in hand.
+    #[test]
+    fn the_binary_notice_names_the_type_it_recognised() {
+        let mut archive = vec![0x50, 0x4B, 0x03, 0x04, 0x14, 0x00];
+        archive.resize(267, 0x00);
+
+        let notice = binary_payload_notice(&archive);
+
+        assert!(notice.contains("267 bytes"), "got: {notice}");
+        assert!(notice.contains("ZIP data"), "got: {notice}");
+        assert!(notice.contains("> payload.zip"), "got: {notice}");
+        // Both ways of capturing it survive naming the type.
+        assert!(notice.contains("--payload-out"), "got: {notice}");
+    }
+
+    /// A type the table does not recognise keeps the words it always had.
+    ///
+    /// `bin` is not a type; it is the table saying it matched nothing, and a
+    /// notice announcing "BIN data" would be inventing an answer.
+    #[test]
+    fn an_unrecognised_payload_is_still_called_binary_data() {
+        let notice = binary_payload_notice(&[0x80, 0x91, 0xA2, 0xB3]);
+
+        assert!(notice.contains("binary data"), "got: {notice}");
+        assert!(notice.contains("> payload.bin"), "got: {notice}");
+        assert!(!notice.contains("BIN data"), "got: {notice}");
+    }
+
+    /// The guidance says that a line already sent is gone.
+    ///
+    /// The arrow keys reach the console's own editor and recall the shell's
+    /// history, so the correction a user reaches for silently replaces their
+    /// message with a command. The way out named is the file, because a line
+    /// editor here would bring a history the message could be written into.
+    #[test]
+    fn the_guidance_says_a_sent_line_cannot_be_taken_back() {
+        assert!(
+            TYPING_GUIDANCE.contains("cannot be edited"),
+            "got: {TYPING_GUIDANCE:?}"
+        );
+        assert!(
+            TYPING_GUIDANCE.contains("-p"),
+            "the way out must be named: {TYPING_GUIDANCE:?}"
         );
     }
 

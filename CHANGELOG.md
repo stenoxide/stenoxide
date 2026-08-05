@@ -44,6 +44,11 @@ They still move in large steps — 3.7.4 to 3.16.4 is nine features, with four
 smaller changes landing after the last of them — but every step in them is a
 change that was made once.
 
+## [Unreleased]
+
+### Features
+- **crypto**: establish the payload key by ML-KEM-1024 encapsulation behind the `pqc` feature — a `keygen` subcommand, `--recipient` on `generate`, and `--identity` on `extract`, with the key files kept as pasteable single lines. The mode is **experimental**: its format is not yet settled and is compiled only with `--features pqc`.
+
 ## [3.7.4] - 2026-08-04
 
 _First installable release since 1.7.2, and the one that ships the work below.

@@ -68,6 +68,35 @@
 //! straight to the gates. A draft on disk would be the original cover, and the
 //! original cover not existing is precisely what this mode buys.
 //!
+//! # Building for a recipient instead of for a password
+//!
+//! Behind the `pqc` feature, [`generate_container_for_recipient`] builds the
+//! same container against an ML-KEM-1024 public key, with no password on either
+//! side. It is **experimental**: the layout it writes is not a settled format
+//! and no default build offers it. Compile it in with
+//! `cargo build --features pqc` on this crate, or `--features pqc` on
+//! `stenoxide-cli`, which forwards it.
+//!
+//! Two things change and nothing else does:
+//!
+//! - **The key does not come from the container.** The sender draws a fresh
+//!   secret, encapsulates it to the recipient's public key, and derives the
+//!   message keys from that. Nothing is stretched, nothing is hashed from the
+//!   image, and the whole candidate search happens *after* the key already
+//!   exists — no draft is rendered, because a draft exists only to pin down a
+//!   perceptual hash nothing is derived from here.
+//! - **1568 bytes of the container are spent on the encapsulation**, which
+//!   travels at the head of the carrier so that a receiver can read it knowing
+//!   nothing. The capacity the caller is told, and the capacity a payload is
+//!   judged against, are both lower by exactly that much.
+//!
+//! Placing the encapsulation at a position anyone can compute costs nothing in
+//! this mode, and it is worth being precise about why: no sample is modified,
+//! so there is no change whose density an analyst could measure over the region
+//! they have located. The same layout in a container a payload was *embedded*
+//! into would hand a steganalyst a known set of positions to aim a targeted
+//! test at, which is a real cost and a different problem.
+//!
 //! # The seed is key material
 //!
 //! There is no cover to subtract, but an adversary who can reproduce the
@@ -95,6 +124,8 @@ use crate::crypto::aead::{
     STENOXIDE_AAD,
 };
 use crate::crypto::expand::{expand_master_key, DerivedKeys, ExpandError};
+#[cfg(feature = "pqc")]
+use crate::crypto::kem::{KemError, RecipientKey};
 use crate::crypto::kdf::{Argon2Kdf, KdfError, KeyDeriver};
 use crate::image_io::buffer::{ColorSpace, CoverSource, ImageBuffer};
 use crate::image_io::jpeg_detect::detect_jpeg_artifacts;
@@ -102,6 +133,7 @@ use crate::image_io::phash::compute_stable_phash;
 use crate::image_io::validate::{MAX_PIXELS, MIN_DIMENSION};
 use crate::pipeline::error::OutputError;
 use crate::pipeline::frame::write_png;
+use crate::stego::sizer::EmbeddingMode;
 
 use self::carrier::{draw_free, draw_with_lsb};
 use self::texture::Texture;
@@ -152,6 +184,14 @@ const MAX_CANDIDATES: u32 = 64;
 
 /// Bytes of the seed the generator is started from.
 const SEED_BYTES: usize = 32;
+
+/// The mode a container built for a recipient's public key is sized in.
+///
+/// Named once so that the generator, the reader and the capacity check cannot
+/// drift apart, and so that the number of bytes key transport costs is asked of
+/// the sizer in exactly one place.
+#[cfg(feature = "pqc")]
+const ASYMMETRIC_MODE: EmbeddingMode = EmbeddingMode::AsymmetricPqc;
 
 /// The size of the container to draw, checked against the two size gates.
 ///
@@ -208,20 +248,27 @@ impl ContainerDimensions {
         self.height
     }
 
-    /// Ciphertext bytes a container of this size carries.
+    /// Carrier bytes a container of this size holds.
     ///
-    /// One bit per sample, tag included: the ciphertext occupies the container
-    /// exactly, to the last sample it can fill.
+    /// One bit per sample: the carrier occupies the container exactly, to the
+    /// last sample it can fill. Everything that travels is counted here — the
+    /// ciphertext, its tag, and whatever the mode spends on getting the key to
+    /// the recipient.
     fn capacity(self) -> usize {
         self.width as usize * self.height as usize * CHANNELS / 8
     }
 
-    /// Compressed payload bytes a container of this size admits.
+    /// Compressed payload bytes a container of this size admits in `mode`.
     ///
-    /// What is left of the capacity once the authentication tag and the length
-    /// header are paid for.
-    fn payload_capacity(self) -> usize {
-        self.capacity().saturating_sub(TAG_BYTES + LENGTH_HEADER_BYTES)
+    /// What is left of the carrier once the authentication tag, the length
+    /// header and the mode's key transport are paid for. The key-transport
+    /// figure is asked of [`EmbeddingMode`] rather than restated here: the
+    /// sizer is where that number is defined, and a second copy of it would be
+    /// a second thing to keep in step.
+    fn payload_capacity(self, mode: EmbeddingMode) -> usize {
+        self.capacity()
+            .saturating_sub(mode.key_transport_overhead_bytes())
+            .saturating_sub(TAG_BYTES + LENGTH_HEADER_BYTES)
     }
 }
 
@@ -300,6 +347,9 @@ pub enum GenerateError {
     Kdf(KdfError),
     /// HKDF-SHA3-512 expansion of the master key failed.
     Expand(ExpandError),
+    /// Encapsulation to the recipient's public key failed.
+    #[cfg(feature = "pqc")]
+    Kem(KemError),
     /// Compression or encryption failed.
     Crypto(CryptoError),
     /// The container could not be written to disk.
@@ -342,6 +392,8 @@ impl fmt::Display for GenerateError {
             GenerateError::Sampling(err) => write!(f, "{err}"),
             GenerateError::Kdf(err) => write!(f, "{err}"),
             GenerateError::Expand(err) => write!(f, "{err}"),
+            #[cfg(feature = "pqc")]
+            GenerateError::Kem(err) => write!(f, "{err}"),
             GenerateError::Crypto(err) => write!(f, "{err}"),
             GenerateError::Output(err) => write!(f, "{err}"),
         }
@@ -354,6 +406,8 @@ impl std::error::Error for GenerateError {
             GenerateError::Sampling(err) => Some(err),
             GenerateError::Kdf(err) => Some(err),
             GenerateError::Expand(err) => Some(err),
+            #[cfg(feature = "pqc")]
+            GenerateError::Kem(err) => Some(err),
             GenerateError::Crypto(err) => Some(err),
             GenerateError::Output(err) => Some(err),
             GenerateError::Entropy(_)
@@ -382,6 +436,13 @@ impl From<ExpandError> for GenerateError {
     }
 }
 
+#[cfg(feature = "pqc")]
+impl From<KemError> for GenerateError {
+    fn from(err: KemError) -> Self {
+        GenerateError::Kem(err)
+    }
+}
+
 impl From<CryptoError> for GenerateError {
     fn from(err: CryptoError) -> Self {
         GenerateError::Crypto(err)
@@ -400,7 +461,8 @@ impl From<OutputError> for GenerateError {
     }
 }
 
-/// The side of a comfortable square container for a payload this large.
+/// The side of a comfortable square container for a payload this large, in
+/// `mode`.
 ///
 /// The smallest square whose payload capacity clears `payload`, then rounded up
 /// to the next hundred pixels — a figure a person can read and repeat, with a
@@ -408,16 +470,19 @@ impl From<OutputError> for GenerateError {
 /// it. `None` when even the largest permitted container is too small: that is
 /// the payload's problem and not a size the user can dial around.
 ///
+/// The mode is taken because it changes the overhead, and a suggestion that
+/// ignored it would name a container the very next attempt refuses.
+///
 /// The rounding never pushes the suggestion past [`MAX_CONTAINER_PIXELS`]; on
 /// the rare payload whose break-even side is within a hundred pixels of the
 /// ceiling, the exact side is quoted instead of a round one that would not fit.
-fn recommended_square_side(payload: usize) -> Option<u32> {
+fn recommended_square_side(payload: usize, mode: EmbeddingMode) -> Option<u32> {
     // capacity(side) = side * side * CHANNELS / 8 - overhead, and a `u8/8`
     // capacity clears `payload` exactly when the sample count reaches
     // `8 * (payload + overhead)`. Everything is taken in `u64`: the product of
     // two sides is what the size gate guards against wrapping, and this is the
     // same product read backwards.
-    let overhead = (TAG_BYTES + LENGTH_HEADER_BYTES) as u64;
+    let overhead = (TAG_BYTES + LENGTH_HEADER_BYTES + mode.key_transport_overhead_bytes()) as u64;
     let needed_bytes = (payload as u64).checked_add(overhead)?;
     let needed_pixels = needed_bytes.checked_mul(8)?.div_ceil(CHANNELS as u64);
 
@@ -552,18 +617,7 @@ fn generate(
     let compressed = compress(plaintext.as_slice())?;
     drop(plaintext);
 
-    let available = dimensions.payload_capacity();
-    if compressed.len() > available {
-        return Err(GenerateError::PayloadTooLarge {
-            payload: compressed.len(),
-            available,
-            deficit: compressed.len() - available,
-            // A square suggestion even for a rectangular request: it is the one
-            // shape a single figure describes, and the user is free to spend it
-            // on whichever pair of sides they like.
-            recommended_side: recommended_square_side(compressed.len()),
-        });
-    }
+    let available = fits(&compressed, dimensions, EmbeddingMode::Symmetric)?;
 
     let mut rng = seed_from_system()?;
 
@@ -588,7 +642,14 @@ fn generate(
         let derived_keys = expand_master_key(&master_key)?;
         drop(master_key);
 
-        let ciphertext = seal(&compressed, dimensions, &mut rng, &derived_keys, &cipher)?;
+        let ciphertext = seal(
+            &compressed,
+            dimensions,
+            EmbeddingMode::Symmetric,
+            &mut rng,
+            &derived_keys,
+            &cipher,
+        )?;
         drop(derived_keys);
 
         // Steps 6 and 7.
@@ -614,6 +675,136 @@ fn generate(
     Err(GenerateError::NoUsableTexture {
         candidates: MAX_CANDIDATES,
     })
+}
+
+/// Builds a `dimensions` container around `plaintext` for the holder of
+/// `recipient`, and writes it to `output_path`.
+///
+/// **Experimental, and compiled only behind the `pqc` feature.** The layout it
+/// writes is not yet a settled format; see the module documentation.
+///
+/// The counterpart of [`generate_container`] with no password anywhere: the
+/// message key is drawn fresh, encapsulated to the recipient's public key, and
+/// the encapsulation travels inside the container. Nothing has to be agreed
+/// beforehand, and — because the key owes nothing to the container — reusing an
+/// image is harmless here rather than merely discouraged.
+///
+/// # Errors
+///
+/// Returns a [`GenerateError`] when the system random number generator cannot
+/// be read, the compressed payload does not fit the requested size, no
+/// candidate texture passes the container gates, a cryptographic step fails, or
+/// the file cannot be written.
+#[cfg(feature = "pqc")]
+pub fn generate_container_for_recipient(
+    plaintext: Zeroizing<Vec<u8>>,
+    recipient: &RecipientKey,
+    dimensions: ContainerDimensions,
+    output_path: &Path,
+) -> Result<GenerateReport, GenerateError> {
+    let cipher = XChaCha20Poly1305Cipher::new();
+
+    let compressed = compress(plaintext.as_slice())?;
+    drop(plaintext);
+
+    let available = fits(&compressed, dimensions, ASYMMETRIC_MODE)?;
+
+    let mut rng = seed_from_system()?;
+
+    // The one structural difference from the password path, and the reason this
+    // is a separate function rather than a branch inside that loop: the shared
+    // secret does not depend on the container, so the encapsulation and the
+    // sealing happen once, above the candidate search, instead of once per
+    // candidate. There is no draft to render either — the draft exists only to
+    // fix a perceptual hash the key is derived from, and here nothing is.
+    //
+    // What survives is the loop itself and the gates it applies: a candidate
+    // still has to hash reproducibly and still has to be a container a
+    // receiver's loader and `scan` accept. It is judged in its final form,
+    // which is the only form there is.
+    let (kem_ciphertext, derived_keys) = recipient.encapsulate()?;
+    let sealed = seal(
+        &compressed,
+        dimensions,
+        ASYMMETRIC_MODE,
+        &mut rng,
+        &derived_keys,
+        &cipher,
+    )?;
+    drop(derived_keys);
+
+    // The encapsulation goes first in sample order, so a receiver can read it
+    // knowing nothing at all — which is the only order that can work, since
+    // everything else is behind the key it carries.
+    //
+    // Placing it at a known offset costs nothing *here*, and the reason is the
+    // reason this mode exists: no sample is modified, every sample is drawn
+    // from the texture's own distribution conditioned on the bit it carries, so
+    // the conditioned distribution equals the marginal. An analyst who knows
+    // exactly which twelve thousand bits hold the encapsulation has no change
+    // to measure the density of, because there was no change. That is *not*
+    // true of a container a payload was embedded into, where a known region is
+    // a region a targeted test can be aimed at; that case is a different
+    // problem and is not solved by copying this layout.
+    let mut carrier = Zeroizing::new(Vec::with_capacity(dimensions.capacity()));
+    carrier.extend_from_slice(&kem_ciphertext);
+    carrier.extend_from_slice(&sealed);
+    drop(sealed);
+
+    for _ in 0..MAX_CANDIDATES {
+        let texture = Texture::new(rng.next_u64(), dimensions.width(), dimensions.height());
+        let container = render(&texture, dimensions, &mut rng, Some(&carrier))?;
+
+        // The hash is not what any key is derived from in this mode, and it is
+        // still checked: `extract` computes it before it tries anything, and a
+        // container whose hash will not settle is one nobody can hand to it.
+        if compute_stable_phash(&container).is_err() || !passes_container_gates(&container) {
+            continue;
+        }
+
+        write_png(&container, output_path)?;
+
+        return Ok(GenerateReport {
+            image_dimensions: container.dimensions(),
+            payload_bytes: compressed.len(),
+            capacity_bytes: available,
+        });
+    }
+
+    Err(GenerateError::NoUsableTexture {
+        candidates: MAX_CANDIDATES,
+    })
+}
+
+/// Checks a compressed payload against what `dimensions` admits in `mode`.
+///
+/// Returns the admitted figure, so the caller can report it without asking a
+/// second time.
+///
+/// # Errors
+///
+/// Returns [`GenerateError::PayloadTooLarge`], carrying a square container that
+/// would hold the payload in this same mode.
+fn fits(
+    compressed: &[u8],
+    dimensions: ContainerDimensions,
+    mode: EmbeddingMode,
+) -> Result<usize, GenerateError> {
+    let available = dimensions.payload_capacity(mode);
+
+    if compressed.len() > available {
+        return Err(GenerateError::PayloadTooLarge {
+            payload: compressed.len(),
+            available,
+            deficit: compressed.len() - available,
+            // A square suggestion even for a rectangular request: it is the one
+            // shape a single figure describes, and the user is free to spend it
+            // on whichever pair of sides they like.
+            recommended_side: recommended_square_side(compressed.len(), mode),
+        });
+    }
+
+    Ok(available)
 }
 
 /// A generator seeded with [`SEED_BYTES`] bytes from the system CSPRNG.
@@ -749,11 +940,15 @@ fn render(
 fn seal(
     compressed: &[u8],
     dimensions: ContainerDimensions,
+    mode: EmbeddingMode,
     rng: &mut StdRng,
     keys: &DerivedKeys,
     cipher: &dyn AEADCipher,
 ) -> Result<Zeroizing<Vec<u8>>, GenerateError> {
-    let plaintext_len = dimensions.capacity().saturating_sub(TAG_BYTES);
+    let plaintext_len = dimensions
+        .capacity()
+        .saturating_sub(mode.key_transport_overhead_bytes())
+        .saturating_sub(TAG_BYTES);
 
     let mut buffer = Zeroizing::new(Vec::with_capacity(plaintext_len));
     // Checked against `payload_capacity` by the caller, so the conversion holds
@@ -795,14 +990,55 @@ pub(crate) fn read_generated(
     keys: &DerivedKeys,
     cipher: &dyn AEADCipher,
 ) -> Result<(Zeroizing<Vec<u8>>, usize), CryptoError> {
+    read_generated_after(image, 0, keys, cipher)
+}
+
+/// Reads the payload of a container built for a recipient's public key.
+///
+/// The same reader as [`read_generated`], starting past the encapsulation that
+/// occupies the head of the carrier. The keys are the ones decapsulation
+/// produced, so by the time this is called the identity has already had its
+/// say — and it cannot have failed, because ML-KEM decapsulation is total; a
+/// wrong identity arrives here with a wrong key and leaves as an
+/// authentication failure, indistinguishable from every other one.
+///
+/// # Errors
+///
+/// As [`read_generated`].
+#[cfg(feature = "pqc")]
+pub(crate) fn read_generated_for_recipient(
+    image: &ImageBuffer,
+    keys: &DerivedKeys,
+    cipher: &dyn AEADCipher,
+) -> Result<(Zeroizing<Vec<u8>>, usize), CryptoError> {
+    read_generated_after(
+        image,
+        ASYMMETRIC_MODE.key_transport_overhead_bytes(),
+        keys,
+        cipher,
+    )
+}
+
+/// Reads the payload out of a container, skipping `key_transport` leading bytes
+/// of carrier.
+///
+/// # Errors
+///
+/// As [`read_generated`].
+fn read_generated_after(
+    image: &ImageBuffer,
+    key_transport: usize,
+    keys: &DerivedKeys,
+    cipher: &dyn AEADCipher,
+) -> Result<(Zeroizing<Vec<u8>>, usize), CryptoError> {
     let samples = image.pixels();
-    let capacity = samples.len() / 8;
+    let capacity = (samples.len() / 8).saturating_sub(key_transport);
 
     if capacity <= TAG_BYTES + LENGTH_HEADER_BYTES {
         return Err(CryptoError::AEADError(AEADError::AuthenticationFailed));
     }
 
-    let ciphertext = Zeroizing::new(gather_carrier_bits(samples, capacity));
+    let ciphertext = Zeroizing::new(gather_carrier_bits(samples, key_transport, capacity));
     let buffer = cipher.decrypt(keys.enc_key(), keys.nonce(), &ciphertext, STENOXIDE_AAD)?;
 
     // Past this line the tag has vouched for every byte, so a malformed header
@@ -830,20 +1066,41 @@ pub(crate) fn read_generated(
     Ok((plaintext, capacity))
 }
 
-/// Collects the least significant bit of the first `bytes * 8` samples.
+/// Collects the least significant bit of `bytes * 8` samples, starting past the
+/// first `skip * 8`.
 ///
 /// Most significant bit of each output byte first, which is the order
 /// [`render`] writes them in.
-fn gather_carrier_bits(samples: &[u8], bytes: usize) -> Vec<u8> {
+fn gather_carrier_bits(samples: &[u8], skip: usize, bytes: usize) -> Vec<u8> {
     let mut out = vec![0u8; bytes];
+    let first = skip * 8;
 
-    for (position, sample) in samples.iter().enumerate().take(bytes * 8) {
-        if let Some(byte) = out.get_mut(position / 8) {
-            *byte |= (sample & 1) << (7 - position % 8);
+    for (offset, sample) in samples.iter().skip(first).take(bytes * 8).enumerate() {
+        if let Some(byte) = out.get_mut(offset / 8) {
+            *byte |= (sample & 1) << (7 - offset % 8);
         }
     }
 
     out
+}
+
+/// The encapsulation a container built for a recipient carries at its head.
+///
+/// `None` when the container is too small to hold one and a payload besides,
+/// which no container this crate draws in that mode is. A container built any
+/// other way returns the bits that happen to sit there, which decapsulate to a
+/// key like any other and fail authentication one step later — the reader has
+/// no way to tell the two apart, and must not have one.
+#[cfg(feature = "pqc")]
+pub(crate) fn read_key_transport(image: &ImageBuffer) -> Option<Vec<u8>> {
+    let samples = image.pixels();
+    let key_transport = ASYMMETRIC_MODE.key_transport_overhead_bytes();
+
+    if samples.len() / 8 <= key_transport + TAG_BYTES + LENGTH_HEADER_BYTES {
+        return None;
+    }
+
+    Some(gather_carrier_bits(samples, 0, key_transport))
 }
 
 #[cfg(test)]
@@ -873,9 +1130,41 @@ mod tests {
         assert_eq!(default.capacity(), samples / 8);
         assert_eq!(default.capacity(), 1_500_000);
         assert_eq!(
-            default.payload_capacity(),
+            default.payload_capacity(EmbeddingMode::Symmetric),
             1_500_000 - TAG_BYTES - LENGTH_HEADER_BYTES
         );
+    }
+
+    /// Building for a recipient costs the container exactly the encapsulation.
+    ///
+    /// The figure a user is quoted and the figure a payload is judged against
+    /// are the same figure, and it drops by the 1568 bytes the sizer says key
+    /// transport costs — not by a number this module decided for itself. A user
+    /// told 1.45 MB and refused at 1.44 MB is a user who cannot act on either
+    /// number.
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn building_for_a_recipient_costs_the_encapsulation_and_nothing_else() {
+        let overhead = ASYMMETRIC_MODE.key_transport_overhead_bytes();
+        assert_eq!(overhead, 1_568);
+
+        for dimensions in [
+            ContainerDimensions::default(),
+            ContainerDimensions::new(2400, 2000).expect("within range"),
+        ] {
+            let symmetric = dimensions.payload_capacity(EmbeddingMode::Symmetric);
+            let asymmetric = dimensions.payload_capacity(ASYMMETRIC_MODE);
+
+            assert_eq!(symmetric - asymmetric, overhead);
+
+            // And the sealed buffer gives the difference back: what the payload
+            // loses, the carrier spends on the encapsulation, to the byte.
+            let sealed_len = dimensions
+                .capacity()
+                .saturating_sub(overhead)
+                .saturating_sub(TAG_BYTES);
+            assert_eq!(sealed_len + TAG_BYTES + overhead, dimensions.capacity());
+        }
     }
 
     /// Capacity is a straight function of the pixel count, square or not.
@@ -920,13 +1209,14 @@ mod tests {
     #[test]
     fn the_recommended_side_is_round_and_sufficient() {
         // The figure from the user report: about 1.78 MB compressed.
-        let side = recommended_square_side(1_782_778).expect("a container this size exists");
+        let mode = EmbeddingMode::Symmetric;
+        let side = recommended_square_side(1_782_778, mode).expect("a container this size exists");
         assert_eq!(side % 100, 0, "the suggestion must be a round figure");
         assert!(side >= MIN_CONTAINER_SIDE);
 
         let admitted = ContainerDimensions::new(side, side)
             .expect("the suggestion must be within range")
-            .payload_capacity();
+            .payload_capacity(mode);
         assert!(
             admitted >= 1_782_778,
             "a container of the suggested side must actually hold the payload"
@@ -934,12 +1224,37 @@ mod tests {
         // And it is not wildly oversized: the previous hundred would not do.
         let admitted_below = ContainerDimensions::new(side - 100, side - 100)
             .expect("within range")
-            .payload_capacity();
+            .payload_capacity(mode);
         assert!(admitted_below < 1_782_778);
 
         // A payload no permitted container can hold has no suggestion to make.
         let unattainable = (MAX_CONTAINER_PIXELS as usize) * CHANNELS / 8;
-        assert!(recommended_square_side(unattainable).is_none());
+        assert!(recommended_square_side(unattainable, mode).is_none());
+    }
+
+    /// The suggestion answers in the mode it was asked about.
+    ///
+    /// A payload that fits a container exactly in the password mode does not
+    /// fit the same container when 1568 bytes of it carry an encapsulation, and
+    /// a suggestion that ignored the mode would name a size the very next
+    /// attempt refuses.
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn the_recommended_side_accounts_for_key_transport() {
+        // The largest payload the default container admits with no key
+        // transport: in the asymmetric mode it needs a bigger container.
+        let payload = ContainerDimensions::default().payload_capacity(EmbeddingMode::Symmetric);
+
+        let suggested = recommended_square_side(payload, ASYMMETRIC_MODE)
+            .expect("a container this size exists");
+
+        assert!(suggested > DEFAULT_CONTAINER_SIDE);
+        assert!(
+            ContainerDimensions::new(suggested, suggested)
+                .expect("the suggestion must be within range")
+                .payload_capacity(ASYMMETRIC_MODE)
+                >= payload
+        );
     }
 
     /// The carrier bits are written and read in the same order.
@@ -955,17 +1270,27 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(gather_carrier_bits(&samples, payload.len()), payload);
+        assert_eq!(gather_carrier_bits(&samples, 0, payload.len()), payload);
 
         // The high bits of a sample are not part of the carrier.
         let noisy: Vec<u8> = samples.iter().map(|bit| bit | 0xF0).collect();
-        assert_eq!(gather_carrier_bits(&noisy, payload.len()), payload);
+        assert_eq!(gather_carrier_bits(&noisy, 0, payload.len()), payload);
+
+        // And a skip lands on a byte boundary: reading past the first byte
+        // gives the rest, which is how the encapsulation is stepped over.
+        assert_eq!(
+            gather_carrier_bits(&samples, 1, payload.len() - 1),
+            payload[1..]
+        );
+        assert_eq!(gather_carrier_bits(&samples, 3, 1), payload[3..]);
     }
 
     /// The sealed buffer occupies the whole container, whatever it carries.
     ///
     /// The property that keeps the message size from leaking: a one-byte
     /// payload and a large one produce ciphertexts of exactly the same length.
+    /// The asymmetric mode fills the container just as exactly, minus the space
+    /// the encapsulation takes at the head of the carrier.
     #[test]
     fn every_sealed_buffer_is_the_same_size() {
         let mut rng = StdRng::seed_from_u64(5);
@@ -973,12 +1298,25 @@ mod tests {
         let keys = keys();
         let dimensions = ContainerDimensions::default();
 
-        for length in [0usize, 1, 4_096, 100_000] {
-            let compressed = vec![0x5Au8; length];
-            let sealed = seal(&compressed, dimensions, &mut rng, &keys, &cipher)
-                .expect("a payload within capacity must seal");
+        #[cfg(not(feature = "pqc"))]
+        let modes = [EmbeddingMode::Symmetric];
+        #[cfg(feature = "pqc")]
+        let modes = [EmbeddingMode::Symmetric, ASYMMETRIC_MODE];
 
-            assert_eq!(sealed.len(), dimensions.capacity(), "payload of {length}");
+        for mode in modes {
+            let transported = mode.key_transport_overhead_bytes();
+
+            for length in [0usize, 1, 4_096, 100_000] {
+                let compressed = vec![0x5Au8; length];
+                let sealed = seal(&compressed, dimensions, mode, &mut rng, &keys, &cipher)
+                    .expect("a payload within capacity must seal");
+
+                assert_eq!(
+                    sealed.len() + transported,
+                    dimensions.capacity(),
+                    "payload of {length} in {mode:?}"
+                );
+            }
         }
     }
 
@@ -996,8 +1334,15 @@ mod tests {
         let dimensions = ContainerDimensions::default();
         let message = b"a message that is compressed, sealed and read back".repeat(4);
         let compressed = compress(&message).expect("compression must succeed");
-        let sealed = seal(&compressed, dimensions, &mut rng, &keys, &cipher)
-            .expect("sealing must succeed");
+        let sealed = seal(
+            &compressed,
+            dimensions,
+            EmbeddingMode::Symmetric,
+            &mut rng,
+            &keys,
+            &cipher,
+        )
+        .expect("sealing must succeed");
 
         let samples: Vec<u8> = (0..sealed.len() * 8)
             .map(|position| {
@@ -1031,6 +1376,98 @@ mod tests {
         );
     }
 
+    /// The encapsulation is at the head, and the payload starts right after it.
+    ///
+    /// Driven at the buffer level, like its symmetric twin above: the samples
+    /// are synthesised from `encapsulation || sealed`, which is exactly what a
+    /// rendered container's least significant bits are in that mode. It pins
+    /// the layout PROMPT27's counterpart has to agree with, without rendering
+    /// four megapixels to do it.
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn a_recipient_container_carries_the_encapsulation_before_the_payload() {
+        let mut rng = StdRng::seed_from_u64(11);
+        let cipher = XChaCha20Poly1305Cipher::new();
+        let keys = keys();
+        let dimensions = ContainerDimensions::default();
+
+        let message = b"encapsulated, not agreed beforehand".repeat(3);
+        let compressed = compress(&message).expect("compression must succeed");
+        let sealed = seal(
+            &compressed,
+            dimensions,
+            ASYMMETRIC_MODE,
+            &mut rng,
+            &keys,
+            &cipher,
+        )
+        .expect("sealing must succeed");
+
+        // A stand-in for the ML-KEM ciphertext: this test is about where the
+        // bytes sit, not about what they decapsulate to.
+        let transport: Vec<u8> = (0..ASYMMETRIC_MODE.key_transport_overhead_bytes())
+            .map(|index| (index % 251) as u8)
+            .collect();
+
+        let mut carrier = transport.clone();
+        carrier.extend_from_slice(&sealed);
+        assert_eq!(carrier.len(), dimensions.capacity());
+
+        let samples: Vec<u8> = (0..carrier.len() * 8)
+            .map(|position| {
+                let byte = carrier.get(position / 8).copied().unwrap_or(0);
+                0x80 | ((byte >> (7 - position % 8)) & 1)
+            })
+            .collect();
+        let image = ImageBuffer::new(
+            samples,
+            dimensions.width(),
+            dimensions.height(),
+            ColorSpace::Rgb8,
+        );
+
+        assert_eq!(
+            read_key_transport(&image),
+            Some(transport),
+            "the encapsulation must be readable with no key at all"
+        );
+
+        match read_generated_for_recipient(&image, &keys, &cipher) {
+            Ok((plaintext, bytes)) => {
+                assert_eq!(plaintext.as_slice(), message.as_slice());
+                assert_eq!(bytes, sealed.len());
+            }
+            Err(error) => panic!("a sealed payload must be recovered: {error}"),
+        }
+
+        // Reading it as a password-mode container starts at the wrong byte and
+        // fails as an authentication failure, like everything else.
+        let error = read_generated(&image, &keys, &cipher)
+            .map(|_| ())
+            .expect_err("the wrong layout must not authenticate");
+        assert!(
+            matches!(error, CryptoError::AEADError(AEADError::AuthenticationFailed)),
+            "got: {error:?}"
+        );
+    }
+
+    /// A container with no room for an encapsulation and a payload has none.
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn a_container_too_small_for_key_transport_carries_none() {
+        let image = ImageBuffer::new(vec![0u8; 64], 4, 4, ColorSpace::Rgb8);
+
+        assert_eq!(read_key_transport(&image), None);
+
+        let error = read_generated_for_recipient(&image, &keys(), &XChaCha20Poly1305Cipher::new())
+            .map(|_| ())
+            .expect_err("a container with no room must be refused");
+        assert!(
+            matches!(error, CryptoError::AEADError(AEADError::AuthenticationFailed)),
+            "got: {error:?}"
+        );
+    }
+
     /// A container too small to hold a header is refused as an authentication
     /// failure, like everything else this reader can refuse.
     #[test]
@@ -1055,7 +1492,7 @@ mod tests {
                 payload: 2_000_000,
                 available: 1_499_980,
                 deficit: 500_020,
-                recommended_side: recommended_square_side(2_000_000),
+                recommended_side: recommended_square_side(2_000_000, EmbeddingMode::Symmetric),
             }
             .to_string(),
             GenerateError::DimensionsOutOfRange {

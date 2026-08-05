@@ -32,6 +32,29 @@ const INFO_NONCE: &[u8] = b"STENOXIDE-v1-nonce";
 /// Domain separator for the seed of the Syndrome-Trellis Codes permutation.
 const INFO_STC_SEED: &[u8] = b"STENOXIDE-v1-stc-seed";
 
+/// Domain separator for the master key an ML-KEM-1024 shared secret stands in
+/// for.
+///
+/// The three separators above keep the subkeys of one master key apart from
+/// each other. This one keeps two *sources* of a master key apart: a password
+/// stretched by Argon2id, and a secret established by key encapsulation. Both
+/// arrive at [`expand_master_key`] and both leave it as the same three subkeys,
+/// so without this step a KEM secret and an Argon2id output that happened to
+/// agree would produce the same encryption key and the same nonce for two
+/// unrelated messages. The odds are negligible and the separation is free, and
+/// a construction that relies on two 256-bit values never colliding when it
+/// could simply not rely on it is one nobody can audit in a sentence.
+///
+/// It is versioned like the others: the day this crate encapsulates to
+/// something other than ML-KEM-1024, that scheme gets its own separator rather
+/// than inheriting this one.
+#[cfg(feature = "pqc")]
+const INFO_KEM_MASTER_KEY: &[u8] = b"STENOXIDE-v1-mlkem1024-master-key";
+
+/// Length of an ML-KEM-1024 shared secret, in bytes.
+#[cfg(feature = "pqc")]
+const SHARED_SECRET_LEN: usize = 32;
+
 /// Every way key expansion can fail.
 #[derive(Debug)]
 pub enum ExpandError {
@@ -137,6 +160,68 @@ pub fn expand_master_key(mk: &MasterKey) -> Result<DerivedKeys, ExpandError> {
     Ok(keys)
 }
 
+/// The secret ML-KEM-1024 establishes between a sender and a recipient.
+///
+/// The buffer is wiped when the value is dropped. Like [`MasterKey`] it
+/// implements neither [`Clone`], [`Copy`] nor [`Debug`], and there is no
+/// accessor: the only thing this crate ever does with a shared secret is hand
+/// it to [`expand_shared_secret`], so nothing else needs to be able to read it.
+///
+/// [`MasterKey`]: crate::crypto::kdf::MasterKey
+#[cfg(feature = "pqc")]
+#[derive(ZeroizeOnDrop)]
+pub struct SharedSecret([u8; SHARED_SECRET_LEN]);
+
+#[cfg(feature = "pqc")]
+impl SharedSecret {
+    /// Takes ownership of the bytes an encapsulation or a decapsulation
+    /// produced.
+    ///
+    /// Restricted to the crate: outside code has no way to inject a secret that
+    /// no key exchange established.
+    pub(crate) fn new(bytes: [u8; SHARED_SECRET_LEN]) -> Self {
+        Self(bytes)
+    }
+}
+
+/// Expands an encapsulated shared secret into the same three subkeys a password
+/// would have produced.
+///
+/// The secret takes the place of the password *and* of the perceptual hash: it
+/// is fresh for every message and independent of the container, which is what
+/// makes reuse of a container harmless in this mode rather than merely
+/// discouraged. It passes through [`INFO_KEM_MASTER_KEY`] first, so the two
+/// sources of a master key can never meet; see that constant for why.
+///
+/// No HKDF salt is supplied here either, and for a stronger reason than in
+/// [`expand_master_key`]: an ML-KEM shared secret is already the output of a
+/// hash function over fresh randomness, so it is uniform by construction and
+/// the extract step has nothing left to condense.
+///
+/// # Errors
+///
+/// Returns [`ExpandError::HkdfError`] if HKDF rejects an output length, which
+/// with the fixed lengths used here it cannot.
+#[cfg(feature = "pqc")]
+pub fn expand_shared_secret(secret: &SharedSecret) -> Result<DerivedKeys, ExpandError> {
+    let hkdf = SimpleHkdf::<Sha3_512>::new(None, &secret.0);
+
+    // Wiped when this returns, on both paths: it is a second live image of key
+    // material, and the `MasterKey` built from it below is a third that
+    // `ZeroizeOnDrop` takes care of.
+    let mut master = zeroize::Zeroizing::new([0u8; SHARED_SECRET_LEN]);
+    hkdf.expand(INFO_KEM_MASTER_KEY, master.as_mut_slice())
+        .map_err(|err| ExpandError::HkdfError(err.to_string()))?;
+
+    let master_key = MasterKey::new(*master);
+    drop(master);
+
+    let keys = expand_master_key(&master_key)?;
+    drop(master_key);
+
+    Ok(keys)
+}
+
 #[cfg(test)]
 mod tests {
     // The crate-wide `deny(clippy::expect_used)` reaches into `cfg(test)` code
@@ -196,5 +281,32 @@ mod tests {
 
         assert_ne!(keys.enc_key().as_slice(), keys.stc_seed().as_slice());
         assert_ne!(&keys.enc_key()[..24], keys.nonce().as_slice());
+    }
+
+    /// The two sources of a master key never meet, even on identical bytes.
+    ///
+    /// The one property [`INFO_KEM_MASTER_KEY`] exists for, asserted the only
+    /// way it can be: by feeding the same thirty-two bytes down both paths and
+    /// demanding that every subkey differ. A separator that was dropped, or
+    /// copied from one of the three above, would fail here and nowhere else —
+    /// the round trips would all still pass, because each mode is
+    /// self-consistent whatever the separator says.
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn a_shared_secret_and_a_password_never_derive_the_same_keys() {
+        const BYTES: [u8; 32] = [0x5Eu8; 32];
+
+        let from_password = expand_master_key(&MasterKey::new(BYTES)).expect("expansion");
+        let from_kem = expand_shared_secret(&SharedSecret::new(BYTES)).expect("expansion");
+
+        assert_ne!(from_password.enc_key(), from_kem.enc_key());
+        assert_ne!(from_password.nonce(), from_kem.nonce());
+        assert_ne!(from_password.stc_seed(), from_kem.stc_seed());
+
+        // And the encapsulated path is itself deterministic and
+        // domain-separated internally, since it ends in the same expansion.
+        let again = expand_shared_secret(&SharedSecret::new(BYTES)).expect("expansion");
+        assert_eq!(from_kem.enc_key(), again.enc_key());
+        assert_ne!(from_kem.enc_key().as_slice(), from_kem.stc_seed().as_slice());
     }
 }

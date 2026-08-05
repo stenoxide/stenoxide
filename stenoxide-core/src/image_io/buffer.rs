@@ -9,6 +9,8 @@
 
 use zeroize::Zeroize;
 
+use crate::image_io::envelope::PngEnvelope;
+
 /// Pixel layout of a decoded container image.
 ///
 /// Only layouts that expose an integer-valued, losslessly representable sample
@@ -99,6 +101,7 @@ pub struct ImageBuffer {
     width: u32,
     height: u32,
     color_space: ColorSpace,
+    envelope: PngEnvelope,
 }
 
 impl ImageBuffer {
@@ -107,13 +110,47 @@ impl ImageBuffer {
     /// Restricted to the crate on purpose: outside code must go through
     /// [`crate::image_io::validate::load_and_validate`], the only path that
     /// runs every validation gate.
+    ///
+    /// The image is given the envelope of a container this crate drew itself,
+    /// which is the right one for every caller that has no file behind its
+    /// samples. A buffer decoded from a real PNG is built by
+    /// [`ImageBuffer::with_envelope`] instead, so that the file written back out
+    /// can be shaped like the file that was read.
     pub(crate) fn new(pixels: Vec<u8>, width: u32, height: u32, color_space: ColorSpace) -> Self {
+        Self::with_envelope(
+            pixels,
+            width,
+            height,
+            color_space,
+            PngEnvelope::synthesised(),
+        )
+    }
+
+    /// Builds a buffer that remembers the wrapper its samples arrived in.
+    pub(crate) fn with_envelope(
+        pixels: Vec<u8>,
+        width: u32,
+        height: u32,
+        color_space: ColorSpace,
+        envelope: PngEnvelope,
+    ) -> Self {
         Self {
             pixels,
             width,
             height,
             color_space,
+            envelope,
         }
+    }
+
+    /// The shape of the file these samples were read from.
+    ///
+    /// What the writing side reproduces, and the only description of the
+    /// container that is about the file rather than about the pixels. See
+    /// [`crate::image_io::envelope`] for what is copied out of it and what is
+    /// deliberately left behind.
+    pub fn envelope(&self) -> &PngEnvelope {
+        &self.envelope
     }
 }
 

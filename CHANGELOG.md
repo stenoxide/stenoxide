@@ -38,10 +38,32 @@
 
 ## [3.7.4] - 2026-08-04
 
+_First installable release since 1.7.2, and the one that ships the work below.
+The entries are written by hand: generated, this section held the version bump
+alone, because the reverts and merges that make up the rest were not
+Conventional Commits and the calculation never saw them. Everything the 3.7.2
+section lists that is not repeated here had already shipped in 1.7.2 — see "Why
+the numbers jump" above._
+
+### Features
+- **core**: generate a container around the payload (#14) — [@adrian-cancio](https://github.com/adrian-cancio) ([`ee99089`](https://github.com/stenoxide/stenoxide/commit/ee99089300fd301db1d17dee31f870048b6d17bf))
+- **generate**: let the container size be chosen when a payload overflows (#16, re-applied as #19 after the revert) — [@adrian-cancio](https://github.com/adrian-cancio) ([`3cac4f6`](https://github.com/stenoxide/stenoxide/commit/3cac4f6684263cd5574d9721b0fc2d1552eb856b))
+
+### Bug Fixes
+- **cli**: guide instead of failing when extracting binary to a terminal (#15) — [@adrian-cancio](https://github.com/adrian-cancio) ([`66c6693`](https://github.com/stenoxide/stenoxide/commit/66c6693cca73f929846953a93f81af191a45c163))
+- resolve the merge conflicts blocking #17 (`main` → `stable`) (#20) — [@adrian-cancio](https://github.com/adrian-cancio) ([`66ee2bd`](https://github.com/stenoxide/stenoxide/commit/66ee2bdbe9777a92e60cf11143e98da890e3d51d))
+
 ### Other Changes
-- bump version to 3.7.3 by hand — [@adrian-cancio](https://github.com/adrian-cancio) ([`1f748bf`](https://github.com/stenoxide/stenoxide/commit/1f748bf77494c09e73f881ea73ec8357b31d2cd1))
+- restore the CI/CD work that #22 reverted by mistake (#23) — [@adrian-cancio](https://github.com/adrian-cancio) ([`9819110`](https://github.com/stenoxide/stenoxide/commit/9819110fc62d57facbfeeb53900b8791fd6e2078))
+- bump version to 3.7.3 by hand, to leave the bad number behind (#24) — [@adrian-cancio](https://github.com/adrian-cancio) ([`1f748bf`](https://github.com/stenoxide/stenoxide/commit/1f748bf77494c09e73f881ea73ec8357b31d2cd1))
 
 ## [3.7.2] - 2026-08-04
+
+_Withdrawn: this tag sits on top of an accidental revert and its binaries are
+missing the work listed below. Use 3.7.4, which ships it. The two major bumps
+between 1.7.2 and this version, and the entries repeated from 1.7.2, both come
+from merge commits that re-listed history already released — see "Why the
+numbers jump" above._
 
 ### Breaking Changes
 - **deps**: raise the minimum supported Rust version to 1.85 — [@adrian-cancio](https://github.com/adrian-cancio) ([`c62c593`](https://github.com/stenoxide/stenoxide/commit/c62c59303915cd867b20d36a5dc4f212ea2ea927))
@@ -129,6 +151,10 @@
 - credit the 0.1.0 entries by GitHub handle — [@adrian-cancio](https://github.com/adrian-cancio) ([`66ee2bd`](https://github.com/stenoxide/stenoxide/commit/66ee2bdbe9777a92e60cf11143e98da890e3d51d))
 
 ## [1.7.2] - 2026-08-04
+
+_First release made by the calculated-version pipeline. The step from 0.1.0 is
+the pipeline replaying every change accumulated since it — one MSRV break, seven
+features and two fixes — rather than a single bump._
 
 ### Breaking Changes
 - **deps**: raise the minimum supported Rust version to 1.85 — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))

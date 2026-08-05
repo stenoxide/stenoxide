@@ -48,7 +48,11 @@ use crate::crypto::aead::{
 };
 use crate::crypto::expand::{expand_master_key, DerivedKeys};
 use crate::crypto::kdf::{Argon2Kdf, KeyDeriver};
+#[cfg(feature = "pqc")]
+use crate::crypto::kem::Identity;
 use crate::generate::read_generated;
+#[cfg(feature = "pqc")]
+use crate::generate::{read_generated_for_recipient, read_key_transport};
 use crate::image_io::buffer::{CoverSource, ImageBuffer};
 use crate::image_io::phash::{
     compute_stable_phash, phash_salt_hypotheses, recover_phash_salt, PHashError, PHashSalt,
@@ -444,6 +448,95 @@ where
                 }
             }
         }
+    }
+
+    /// Recovers a message that was encapsulated to `identity`, rather than
+    /// hidden under a password.
+    ///
+    /// **Experimental, and compiled only behind the `pqc` feature.**
+    ///
+    /// The counterpart of [`crate::generate::generate_container_for_recipient`].
+    /// The mode is selected by the caller handing over an identity instead of a
+    /// password — never guessed from the container, which carries nothing that
+    /// says which mode built it and must not.
+    ///
+    /// # Why this path is not folded into [`EmbedPipeline::extract`]
+    ///
+    /// Because trying both would cost the expensive half of both. The password
+    /// path pays for Argon2id at 128 MiB before it can look at anything; this
+    /// one never touches Argon2id at all. Attempting the asymmetric reading
+    /// inside the password path would gain nothing — there is no identity to
+    /// try it with — and attempting the password readings here would mean
+    /// stretching a password nobody supplied.
+    ///
+    /// # The oracle, and the clock
+    ///
+    /// Every failure below is the same failure the password path reports, as
+    /// the same value: a wrong identity, a container carrying nothing and a
+    /// damaged payload are one answer. Decapsulation cannot fail — FIPS 203
+    /// specifies implicit rejection, so a ciphertext that was not encapsulated
+    /// to this key yields a pseudorandom secret rather than an error — which is
+    /// what keeps a wrong identity from short-circuiting: it does the same work
+    /// as the right one and dies at the same Poly1305 tag.
+    ///
+    /// The two modes are not the same *speed*, and that is deliberate rather
+    /// than overlooked. This path costs a decapsulation and one pass over the
+    /// container, some tens of milliseconds; the password path costs Argon2id
+    /// on top of that. But an observer timing this process already knows which
+    /// mode is running, because the mode is an argument on the command line and
+    /// not a property of the container. What a clock must not separate is the
+    /// outcomes *within* one mode, and here it cannot: success and every kind
+    /// of failure run the identical sequence up to a tag comparison.
+    ///
+    /// A caller that unlocked the identity from a file has also, by then, paid
+    /// one Argon2id for the file's passphrase — so the two modes end up within
+    /// the same order of magnitude of each other in practice.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`PipelineError`] wrapping [`AEADError::AuthenticationFailed`]
+    /// for every recoverable failure, or the error of the layer that refused
+    /// the file outright.
+    #[cfg(feature = "pqc")]
+    pub fn extract_with_identity(
+        &self,
+        stego_path: &Path,
+        identity: &Identity,
+    ) -> Result<(Zeroizing<Vec<u8>>, ExtractReport), PipelineError> {
+        // Step 1 — the same gates a cover goes through, as everywhere else.
+        let stego_image = load_and_validate(stego_path)?;
+
+        let rejected = || {
+            PipelineError::Crypto(CryptoError::AEADError(AEADError::AuthenticationFailed))
+        };
+
+        // Step 2 — the encapsulation, read from the head of the carrier. No key
+        // is needed to find it, which is the whole reason it is there; see the
+        // `generate` module for why that is free in this construction and not
+        // in the embedding one.
+        let Some(kem_ciphertext) = read_key_transport(&stego_image) else {
+            return Err(rejected());
+        };
+
+        // Step 3 — the message keys. Total: any container at all produces some
+        // key here, and only the tag below decides whether it was the right one.
+        let derived_keys = identity
+            .decapsulate(&kem_ciphertext)
+            .map_err(|_| rejected())?;
+        drop(kem_ciphertext);
+
+        // Step 4 — the payload, and the single failure.
+        let outcome = read_generated_for_recipient(&stego_image, &derived_keys, &self.aead);
+        drop(derived_keys);
+
+        let (plaintext, ciphertext_bytes) = outcome.map_err(|_| rejected())?;
+
+        Ok((
+            plaintext,
+            ExtractReport {
+                payload_bytes: ciphertext_bytes,
+            },
+        ))
     }
 
     /// Runs the extraction chain once, under one candidate salt.

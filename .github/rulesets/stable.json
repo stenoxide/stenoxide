@@ -4,7 +4,7 @@
   "enforcement": "active",
   "conditions": { "ref_name": { "include": ["refs/heads/stable"], "exclude": [] } },
   "bypass_actors": [
-    { "actor_id": 15368, "actor_type": "Integration", "bypass_mode": "always" }
+    { "actor_id": 1, "actor_type": "OrganizationAdmin", "bypass_mode": "always" }
   ],
   "rules": [
     { "type": "deletion" },

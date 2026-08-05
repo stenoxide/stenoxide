@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
 members = ["stenoxide-core", "stenoxide-cli"]
+# The fuzzing crate is a package inside this directory that is deliberately not
+# a member of the workspace. Its targets need a nightly toolchain, sanitizer
+# instrumentation and libFuzzer, so a plain `cargo build --workspace` must not
+# reach for it and `cargo test --workspace` must not try to run it. It declares
+# an empty `[workspace]` of its own as well; naming it here is what makes the
+# arrangement visible from the side people read first.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "3.16.4"
@@ -30,6 +37,12 @@ codegen-units = 1
 
 [workspace.dependencies]
 image = "0.25"
+# Already in the tree as a transitive dependency of `image`, which is where the
+# lock file pins it. Promoting it to a direct dependency adds nothing to what is
+# compiled; it only lets the container be written chunk by chunk instead of
+# through the one-shot encoder above, which is what makes the file layout ours
+# to choose.
+png = "0.18"
 zstd = "0.13"
 argon2 = "0.5"
 hkdf = "0.13"

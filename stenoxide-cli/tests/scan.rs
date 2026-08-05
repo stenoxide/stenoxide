@@ -65,6 +65,42 @@ fn place_cover(directory: &Path, name: &str) -> PathBuf {
     path
 }
 
+/// Copies the shared container into `directory` under `name`, with the least
+/// significant bit of one sample in a thousand flipped.
+///
+/// A different file by every measure a filesystem has — different pixels,
+/// different bytes, a different checksum — and the same perceptual hash. That
+/// is not a coincidence to be engineered around: the hash is computed over a
+/// 32x32 thumbnail, where one sample averages some four thousand pixels, and a
+/// change of one level in a fraction of them cannot move an average of that.
+/// Extraction depends on the same property, because the receiver recomputes the
+/// salt from the stego image and has to land on the value the sender computed
+/// over the cover.
+///
+/// So this is exactly what a stego image is to the cover it was made from, and
+/// close enough to what the second frame of a burst is to the first.
+fn place_variant(directory: &Path, name: &str) -> PathBuf {
+    let path = directory.join(name);
+    let image = image::open(shared_cover())
+        .expect("the cover should be readable")
+        .to_rgb8();
+
+    let (width, height) = image.dimensions();
+    let mut samples = image.into_raw();
+    for (index, sample) in samples.iter_mut().enumerate() {
+        if index % 997 == 0 {
+            *sample ^= 1;
+        }
+    }
+
+    image::RgbImage::from_raw(width, height, samples)
+        .expect("the samples should still describe the same geometry")
+        .save_with_format(&path, image::ImageFormat::Png)
+        .expect("the variant should be writable");
+
+    path
+}
+
 /// Writes a PNG that is a valid image and too small to be a container.
 fn place_undersized(directory: &Path, name: &str) -> PathBuf {
     let path = directory.join(name);
@@ -504,6 +540,115 @@ fn a_scan_that_accepts_something_names_the_next_command() {
     // A document is a document.
     let document = stdout_of(&stenoxide(&["scan", &path, "--json"]));
     assert!(!document.contains("stenoxide embed"), "got: {document}");
+}
+
+/// TEST 30 — two containers that derive one salt are named together, and stay
+/// usable.
+///
+/// The condition this warning exists for, built the way a user actually meets
+/// it: not two unrelated photographs colliding by accident — the hash is 64 bits
+/// and that does not happen — but two files that are nearly the same picture.
+/// A burst, two exports of one raw file, a stego image beside the cover it came
+/// from. Neither file is defective and no gate can refuse either of them, so
+/// the only place the pair is visible is a scan that sees both at once.
+///
+/// Driven through the process because that is where the property lives: the
+/// warning has to reach the listing a person reads *and* the document a script
+/// parses, and it has to leave both files counted as valid in each.
+#[test]
+fn a_scan_names_the_containers_that_derive_one_salt() {
+    let directory = TempDir::new().expect("temporary directory");
+    let first = place_cover(directory.path(), "burst-01.png");
+    let second = place_variant(directory.path(), "burst-02.png");
+
+    // The premise, asserted rather than assumed: two files, not one file twice.
+    assert_ne!(
+        std::fs::read(&first).expect("the cover should be readable"),
+        std::fs::read(&second).expect("the variant should be readable"),
+        "the two containers must differ on disk"
+    );
+
+    let path = directory.path().to_string_lossy().into_owned();
+    let listing = stdout_of(&stenoxide(&["scan", &path]));
+
+    assert!(
+        listing.contains("one container as far as the key is concerned"),
+        "got: {listing}"
+    );
+    assert!(listing.contains("burst-01.png"), "got: {listing}");
+    assert!(listing.contains("burst-02.png"), "got: {listing}");
+    assert!(
+        listing.contains("Give each image its own password"),
+        "the warning must say what to do about it: {listing}"
+    );
+
+    // Both are still containers. A collision is a fact about the pair, not a
+    // defect in either file, and nothing about the verdicts changes.
+    assert!(
+        listing.contains("Summary: 2 valid, 0 invalid (2 scanned)"),
+        "got: {listing}"
+    );
+
+    let document = stdout_of(&stenoxide(&["scan", &path, "--json"]));
+    let keys = parse(&document);
+    assert!(
+        keys.iter().any(|key| key == "salt_collisions"),
+        "the document has no salt_collisions key: {document}"
+    );
+    assert!(document.contains("burst-01.png"), "got: {document}");
+    assert!(document.contains("burst-02.png"), "got: {document}");
+    assert!(document.contains("\"valid\": 2"), "got: {document}");
+    // A document is a document: the sentence a person reads is not in it.
+    assert!(
+        !document.contains("WARNING"),
+        "the document must carry no prose: {document}"
+    );
+
+    // And one container on its own has nothing to collide with, so the report
+    // says nothing at all — the warning must not become a fixture of every scan.
+    let alone = stdout_of(&stenoxide(&["scan", &first.to_string_lossy()]));
+    assert!(!alone.contains("WARNING"), "got: {alone}");
+
+    let alone_document = stdout_of(&stenoxide(&["scan", &first.to_string_lossy(), "--json"]));
+    assert!(
+        !alone_document.contains("salt_collisions"),
+        "a scan with no collision must produce the document it always did: {alone_document}"
+    );
+}
+
+/// TEST 31 — a recursive scan groups containers that sit in different folders.
+///
+/// The case that makes the warning worth having. Two frames of one burst are
+/// rarely side by side in the same directory by the time they matter: one is in
+/// this year's folder and the other in an export, a backup or a subfolder made
+/// for the occasion. A person comparing two listings by eye would not put them
+/// together; a scan that reads both at once has no difficulty.
+#[test]
+fn a_recursive_scan_groups_containers_across_directories() {
+    let directory = TempDir::new().expect("temporary directory");
+    let nested = directory.path().join("exported");
+    std::fs::create_dir(&nested).expect("subdirectory should be creatable");
+
+    place_cover(directory.path(), "original.png");
+    place_variant(&nested, "reexported.png");
+
+    let path = directory.path().to_string_lossy().into_owned();
+
+    // Without descending, only one of the two is even seen.
+    let shallow = stdout_of(&stenoxide(&["scan", &path]));
+    assert!(!shallow.contains("WARNING"), "got: {shallow}");
+
+    let deep = stdout_of(&stenoxide(&["scan", &path, "--recursive"]));
+    assert!(
+        deep.contains("one container as far as the key is concerned"),
+        "got: {deep}"
+    );
+    assert!(deep.contains("original.png"), "got: {deep}");
+    assert!(deep.contains("reexported.png"), "got: {deep}");
+    assert!(
+        deep.contains("Summary: 2 valid, 0 invalid (2 scanned)"),
+        "got: {deep}"
+    );
 }
 
 /// The set of top-level keys of a JSON object.

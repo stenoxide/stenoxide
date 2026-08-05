@@ -1,0 +1,65 @@
+[package]
+name = "stenoxide-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace root, and deliberately so. The targets below are built by a
+# nightly toolchain with sanitizer instrumentation and linked against libFuzzer,
+# none of which the workspace wants: a plain `cargo build --workspace` must not
+# compile any of this, and `cargo test --workspace` must not try to run it. The
+# root manifest excludes this directory from the other side as well, so the two
+# statements agree rather than one of them being load-bearing on its own.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# `test-utils` is what makes T2 affordable: it exposes the deliberately weak key
+# deriver the integration suite uses. A fuzzing campaign is hundreds of
+# thousands of executions, and production Argon2id spends 128 MiB and some four
+# hundred milliseconds on each of them — that is not a campaign, it is a stall.
+stenoxide-core = { path = "../stenoxide-core", features = ["test-utils"] }
+# The loader takes a path, so arbitrary bytes have to reach it as a file.
+tempfile = "3"
+# The pipeline takes and returns its secrets in a wiping wrapper, so a caller
+# has to name the type. Same major version as the one `stenoxide-core` uses;
+# two incompatible copies would not typecheck.
+zeroize = "1.9"
+# Only the corpus seeder needs this, to write a Zstandard frame the
+# decompression target can start from rather than discovering the format's
+# magic bytes by brute force.
+zstd = "0.13"
+
+[[bin]]
+name = "loader"
+path = "fuzz_targets/loader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extract"
+path = "fuzz_targets/extract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decompress"
+path = "fuzz_targets/decompress.rs"
+test = false
+doc = false
+bench = false
+
+# Not a fuzz target, although `cargo fuzz list` shows it beside them: it is the
+# one-shot program that writes the seed corpus. It links no libFuzzer and builds
+# on stable; see `src/bin/seed_corpus.rs`.
+[[bin]]
+name = "seed_corpus"
+path = "src/bin/seed_corpus.rs"
+test = false
+doc = false
+bench = false

@@ -51,6 +51,22 @@ jobs:
         if: github.base_ref == 'stable'
         run: cargo test --workspace
 
+      # The embedding invariant gate — the tests that measure what this program
+      # is, rather than that its code runs — drives a full pipeline over a
+      # four-megapixel container plus a HILL cost map. In a debug build that is
+      # minutes of work, so the gate refuses to compile under one; it is
+      # deliberately excluded from `cargo test` above and run here, alone, in an
+      # optimised build where it stays under a minute.
+      #
+      # It stays on `stable` for the same reason the rest of the expensive suite
+      # does: running it against `main` would mean compiling the workspace in
+      # release on every pull request, which is well over the minute the cheap
+      # split allows. It guards the release merge, which is the place the
+      # property it measures actually matters.
+      - name: Run the embedding invariant gate
+        if: github.base_ref == 'stable'
+        run: cargo test --release -p stenoxide-core --test embedding_invariants
+
       - name: Install cargo-llvm-cov
         if: github.base_ref == 'stable'
         run: cargo install cargo-llvm-cov --locked

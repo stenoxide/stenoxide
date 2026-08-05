@@ -12,6 +12,30 @@
 //! stenoxide generate --output container.png --input big.bin --width 2500 --height 2500
 //! ```
 //!
+//! # The experimental public-key mode
+//!
+//! Compiled only when the `pqc` feature is enabled — `cargo install
+//! stenoxide-cli --features pqc`, or `cargo build -p stenoxide-cli --features
+//! pqc` from a checkout — and absent from every release binary until the mode
+//! is finished. It adds one subcommand and one flag to each of two others:
+//!
+//! ```text
+//! stenoxide keygen   --public me.pub --private me.key
+//! stenoxide generate --output container.png --input message.txt --recipient them.pub
+//! stenoxide extract  --input container.png --identity me.key
+//! ```
+//!
+//! The recipient publishes `me.pub` and keeps `me.key`. A sender needs only the
+//! public file, and there is no password to agree on beforehand. It applies to
+//! `generate` alone: `embed` has a design question of its own to settle before
+//! it can offer the same thing, and offering half of it would be worse than
+//! offering none.
+//!
+//! The passphrase that protects a private key file is local to the machine it
+//! is on. It is not the password of the symmetric modes and it is never shared
+//! with anybody; every prompt that reads one says so, because confusing the two
+//! is the mistake waiting to be made.
+//!
 //! The payload has always been arbitrary bytes rather than text, so the file
 //! forms are not a new capability so much as the end of a shell redirection the
 //! user had to arrange themselves. They change nothing about what is embedded:
@@ -109,12 +133,20 @@ use zeroize::Zeroizing;
 
 use stenoxide_core::cost::hill::HillCostProvider;
 use stenoxide_core::cost::CostProvider;
+#[cfg(feature = "pqc")]
+use stenoxide_core::crypto::aead::XChaCha20Poly1305Cipher;
+#[cfg(feature = "pqc")]
+use stenoxide_core::crypto::kdf::Argon2Kdf;
+#[cfg(feature = "pqc")]
+use stenoxide_core::crypto::kem::{Identity, KemError, RecipientKey};
+#[cfg(feature = "pqc")]
+use stenoxide_core::generate::generate_container_for_recipient;
 use stenoxide_core::generate::{
     generate_container, ContainerDimensions, GenerateError, GenerateReport, DEFAULT_CONTAINER_SIDE,
     MIN_CONTAINER_SIDE,
 };
 use stenoxide_core::image_io::buffer::ImageBuffer;
-use stenoxide_core::image_io::phash::{compute_stable_phash, PHashError};
+use stenoxide_core::image_io::phash::{compute_stable_phash, PHashError, PHashSalt};
 use stenoxide_core::image_io::validate::{load_and_validate, ValidationError};
 use stenoxide_core::pipeline::{EmbedPipeline, EmbedReport, PipelineError};
 use stenoxide_core::stego::sizer::{compute_capacity, EmbeddingMode, SizerError};
@@ -132,6 +164,31 @@ const EXTRACTION_FAILED: &str = "Could not extract the payload.";
 
 /// Prompt shown when the password is read from the terminal.
 const PASSWORD_PROMPT: &str = "Password: ";
+
+/// Prompt shown when an existing private key file has to be unlocked.
+///
+/// It names the file rather than saying "passphrase", because the whole risk
+/// here is a user reaching for the password they hide messages under.
+#[cfg(feature = "pqc")]
+const KEY_PASSPHRASE_PROMPT: &str = "Passphrase for the private key file: ";
+
+/// Prompt shown for the second reading of a new passphrase.
+#[cfg(feature = "pqc")]
+const KEY_PASSPHRASE_REPEAT_PROMPT: &str = "Repeat it: ";
+
+/// What is said before a passphrase for a new key file is asked for.
+///
+/// Three sentences, and each of them exists because of a specific way this goes
+/// wrong: reusing the message password, expecting a correspondent to be asked
+/// for this, and losing it. Plain ASCII, like [`TYPING_GUIDANCE`], for the same
+/// reason.
+#[cfg(feature = "pqc")]
+const KEY_PASSPHRASE_GUIDANCE: &str = "\
+This passphrase protects the private key file on this machine and nothing else.
+It is not the password used to hide a message, it never travels, and nobody you
+send the public key to is ever asked for it.
+There is no recovery: lose it and everything sent to this key is unreadable.
+";
 
 /// The line that ends a message typed at the terminal.
 ///
@@ -166,6 +223,33 @@ the error printed when a payload overflows names a size that would hold it.
 It does not hide that the container was generated. It looks like a synthetic
 texture, and a folder full of them is itself the thing worth explaining. Prefer
 a photograph of your own that has never been published, whenever you have one.";
+
+/// The long help of `keygen`, which has three things it must say.
+///
+/// What the two files are for, that the passphrase on the private one is local,
+/// and that the whole mode is unfinished. The last is not a disclaimer for its
+/// own sake: someone who publishes a key today is making a commitment that this
+/// program is not yet in a position to honour across versions.
+#[cfg(feature = "pqc")]
+const KEYGEN_LONG_ABOUT: &str = "\
+Generate a key pair, so that people can hide messages for you without agreeing
+on a password with you first.
+
+The public file is meant to be published: put it in a profile, paste it into a
+chat, send it wherever. Anyone holding it can run
+
+  stenoxide generate --recipient <that file> --output container.png
+
+and only the holder of the private file can read the result. The message key is
+drawn fresh for every container and owes nothing to the image, so reusing a
+picture is harmless here rather than merely discouraged.
+
+The private file is protected by a passphrase that is local to this machine. It
+is not the password used to hide a message, it never travels, and nobody you
+send the public key to is ever asked for it. There is no recovery.
+
+EXPERIMENTAL. The file format is not settled and a later release may not read
+keys generated today. Do not build anything on it yet.";
 
 /// The line `embed` adds when it refuses the photograph it was given.
 ///
@@ -334,7 +418,34 @@ enum Command {
         #[arg(long, value_name = "PIXELS", default_value_t = DEFAULT_CONTAINER_SIDE,
               value_parser = clap::value_parser!(u32).range(i64::from(MIN_CONTAINER_SIDE)..))]
         height: u32,
+        /// EXPERIMENTAL. Public key file of the recipient, from stenoxide
+        /// keygen. When given, no password is asked for: the message key is
+        /// encapsulated to this key and travels inside the container, which
+        /// costs 1568 bytes of capacity.
+        // No short form. The letters are spoken for and this flag is too new to
+        // spend one of the few that are left; see the map on this enum.
+        #[cfg(feature = "pqc")]
+        #[arg(long, value_name = "PATH")]
+        recipient: Option<PathBuf>,
         /// Overwrite the output file if it already exists.
+        #[arg(long, short = 'f')]
+        force: bool,
+    },
+    /// Generate a key pair, so others can hide messages for you without a
+    /// shared password. EXPERIMENTAL.
+    #[cfg(feature = "pqc")]
+    #[command(long_about = KEYGEN_LONG_ABOUT)]
+    Keygen {
+        /// Where to write the public key: the file to publish. The full path,
+        /// file name included.
+        #[arg(long, value_name = "PATH")]
+        public: PathBuf,
+        /// Where to write the private key: the file to keep. The full path,
+        /// file name included.
+        #[arg(long, value_name = "PATH")]
+        private: PathBuf,
+        /// Overwrite the two output files if they already exist. Replacing a
+        /// key pair destroys everything that was ever encrypted to it.
         #[arg(long, short = 'f')]
         force: bool,
     },
@@ -344,6 +455,13 @@ enum Command {
         /// The stego image to read.
         #[arg(long, short = 'i', value_name = "PATH")]
         input: PathBuf,
+        /// EXPERIMENTAL. Private key file to read the container with, from
+        /// stenoxide keygen. When given, no password is asked for: the
+        /// container is read with this identity instead. The passphrase you are
+        /// prompted for unlocks the key file and nothing else.
+        #[cfg(feature = "pqc")]
+        #[arg(long, value_name = "PATH")]
+        identity: Option<PathBuf>,
         /// Where to write the recovered payload, the hidden file or message.
         /// Written to standard output when absent. A directory receives a file
         /// named after the type of the content; a path without an extension is
@@ -404,6 +522,31 @@ struct ScanArgs {
     json: bool,
 }
 
+/// Where `generate` gets the key it encrypts under.
+///
+/// A type rather than an `Option<&Path>` threaded through the run function: the
+/// second variant does not exist in a default build, and reducing "which mode"
+/// to one value decided in `main` keeps the rest of the program from asking the
+/// question twice and answering it differently.
+enum GenerateKeySource {
+    /// A password read from the terminal. The default, and the only mode a
+    /// release binary offers.
+    Password,
+    /// A recipient's public key file. No password is read at all.
+    #[cfg(feature = "pqc")]
+    Recipient(PathBuf),
+}
+
+/// Where `extract` gets the key it decrypts with. The counterpart of
+/// [`GenerateKeySource`].
+enum ExtractKeySource {
+    /// A password read from the terminal.
+    Password,
+    /// A private key file, unlocked by its own local passphrase.
+    #[cfg(feature = "pqc")]
+    Identity(PathBuf),
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -420,13 +563,43 @@ fn main() -> ExitCode {
             input,
             width,
             height,
+            #[cfg(feature = "pqc")]
+            recipient,
             force,
-        } => run_generate(output, input.as_deref(), *width, *height, *force),
+        } => {
+            #[cfg(feature = "pqc")]
+            let source = match recipient {
+                Some(path) => GenerateKeySource::Recipient(path.clone()),
+                None => GenerateKeySource::Password,
+            };
+            #[cfg(not(feature = "pqc"))]
+            let source = GenerateKeySource::Password;
+
+            run_generate(output, input.as_deref(), *width, *height, *force, &source)
+        }
+        #[cfg(feature = "pqc")]
+        Command::Keygen {
+            public,
+            private,
+            force,
+        } => run_keygen(public, private, *force),
         Command::Extract {
             input,
+            #[cfg(feature = "pqc")]
+            identity,
             payload_out,
             force,
-        } => run_extract(input, payload_out.as_deref(), *force),
+        } => {
+            #[cfg(feature = "pqc")]
+            let source = match identity {
+                Some(path) => ExtractKeySource::Identity(path.clone()),
+                None => ExtractKeySource::Password,
+            };
+            #[cfg(not(feature = "pqc"))]
+            let source = ExtractKeySource::Password;
+
+            run_extract(input, payload_out.as_deref(), *force, &source)
+        }
         Command::Completions { shell } => run_completions(*shell),
         Command::Man => run_man(),
     };
@@ -456,6 +629,41 @@ fn read_password() -> Result<Zeroizing<Vec<u8>>, String> {
     rpassword::prompt_password(PASSWORD_PROMPT)
         .map(|password| Zeroizing::new(password.into_bytes()))
         .map_err(|err| format!("Error: could not read the password: {err}"))
+}
+
+/// Reads the local passphrase that protects a private key file.
+///
+/// # Why it repeats the question
+///
+/// `repeat` is `true` exactly when a new file is being sealed. It asks a
+/// second time and compares the two — the one defense against a typo that
+/// cannot be seen, in a passphrase there is no recovering from losing. It is
+/// false when opening an existing file, which is an operation that already has
+/// a confirmation step: the MAC verifies or it doesn't.
+///
+/// # Errors
+///
+/// Returns a message describing why the terminal could not be read, or why the
+/// two passes did not match.
+#[cfg(feature = "pqc")]
+fn read_local_passphrase(repeat: bool) -> Result<Zeroizing<Vec<u8>>, String> {
+    let passphrase = rpassword::prompt_password(KEY_PASSPHRASE_PROMPT)
+        .map(|passphrase| Zeroizing::new(passphrase.into_bytes()))
+        .map_err(|err| format!("Error: could not read the passphrase: {err}"))?;
+
+    if repeat {
+        let repeated = rpassword::prompt_password(KEY_PASSPHRASE_REPEAT_PROMPT)
+            .map(|passphrase| Zeroizing::new(passphrase.into_bytes()))
+            .map_err(|err| format!("Error: could not read the passphrase: {err}"))?;
+
+        if *passphrase != *repeated {
+            return Err(
+                "Error: passphrases do not match. The key file was not created.".to_string(),
+            );
+        }
+    }
+
+    Ok(passphrase)
 }
 
 /// Reads the message to hide from standard input.
@@ -818,7 +1026,13 @@ fn run_generate(
     width: u32,
     height: u32,
     force: bool,
+    key_source: &GenerateKeySource,
 ) -> Result<(), String> {
+    // In a release build the source can only ever be the password, but the
+    // parameter exists so that one signature serves both builds.
+    #[cfg(not(feature = "pqc"))]
+    let _ = key_source;
+
     let dimensions =
         ContainerDimensions::new(width, height).map_err(|err| describe_generate_failure(&err))?;
 
@@ -834,8 +1048,6 @@ fn run_generate(
         Some(path) => Some((payload::open_payload_file(path)?, path)),
         None => None,
     };
-
-    let password = read_password()?;
 
     let plaintext = match source {
         Some((handle, path)) => payload::read_payload_file(handle, path)?,
@@ -853,7 +1065,27 @@ fn run_generate(
     // container size and of how many candidate textures the gates refuse.
     let activity = progress::Activity::start();
 
-    let outcome = generate_container(plaintext, password, dimensions, output);
+    // The two modes disagree on where the key comes from and on nothing else.
+    // Both draw it before the container, because neither derives it from the
+    // image, and both draw it after the payload: everything that can be settled
+    // before a key is read is settled first, so that nothing is read for a
+    // payload that turns out to be empty.
+    #[cfg(feature = "pqc")]
+    let outcome = match key_source {
+        GenerateKeySource::Password => {
+            let password = read_password()?;
+            generate_container(plaintext, password, dimensions, output)
+        }
+        GenerateKeySource::Recipient(path) => {
+            let recipient = read_recipient_key(path)?;
+            generate_container_for_recipient(plaintext, &recipient, dimensions, output)
+        }
+    };
+    #[cfg(not(feature = "pqc"))]
+    let outcome = {
+        let password = read_password()?;
+        generate_container(plaintext, password, dimensions, output)
+    };
 
     activity.finish();
 
@@ -861,6 +1093,25 @@ fn run_generate(
 
     print_generate_report(&report, output);
     Ok(())
+}
+
+/// Reads a recipient's public key file.
+///
+/// The file is checked and read in one step rather than existence-checked and
+/// then read: a file that is replaced between the two would pass the check and
+/// be read from the wrong thing, and this is the one place in the program
+/// where a file's *contents* are trusted as identity.
+///
+/// # Errors
+///
+/// Returns a message naming the path and why it was refused.
+#[cfg(feature = "pqc")]
+fn read_recipient_key(path: &Path) -> Result<RecipientKey, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("Error: could not read {}: {err}", path.display()))?;
+
+    RecipientKey::from_public_file(&text)
+        .map_err(|err| format!("Error: {} is not a usable recipient key: {err}", path.display()))
 }
 
 /// Turns a failure of the generator into the sentence the user reads.
@@ -984,7 +1235,17 @@ fn print_report(report: &EmbedReport, output: &Path) {
 /// A successful extraction whose binary payload is bound for a terminal returns a
 /// distinct guidance message instead; see [`write_recovered_to_stdout`] for why
 /// that is not the oracle the failure sentence avoids.
-fn run_extract(input: &Path, payload_out: Option<&Path>, force: bool) -> Result<(), String> {
+fn run_extract(
+    input: &Path,
+    payload_out: Option<&Path>,
+    force: bool,
+    key_source: &ExtractKeySource,
+) -> Result<(), String> {
+    // As in `run_generate`: one signature for both builds, and the value can
+    // only be the password in a release build.
+    #[cfg(not(feature = "pqc"))]
+    let _ = key_source;
+
     drop(load_container(input)?);
 
     if let Some(path) = payload_out {
@@ -993,8 +1254,6 @@ fn run_extract(input: &Path, payload_out: Option<&Path>, force: bool) -> Result<
         }
     }
 
-    let password = read_password()?;
-
     // The indeterminate indicator, and only that one. It names no stage and
     // reads identically whether the extraction is about to succeed or about to
     // fail; a staged bar here would announce which of the three failure modes
@@ -1002,9 +1261,33 @@ fn run_extract(input: &Path, payload_out: Option<&Path>, force: bool) -> Result<
     // the `progress` module.
     let activity = progress::Activity::start();
 
-    let outcome = EmbedPipeline::default_secure()
-        .extract(input, password)
-        .map_err(|_| EXTRACTION_FAILED.to_string());
+    // In the asymmetric mode there is no password to read at all. The identity
+    // is instead unlocked before the work begins — an operation that is
+    // separate from the extraction and reports its own failures, because it is
+    // the one place a wrong passphrase can be told apart from a container that
+    // carries nothing. See `Identity::open` for why that is not the oracle.
+    #[cfg(feature = "pqc")]
+    let outcome = match key_source {
+        ExtractKeySource::Password => {
+            let password = read_password()?;
+            EmbedPipeline::default_secure().extract(input, password)
+        }
+        ExtractKeySource::Identity(path) => {
+            let identity = read_identity(path)?;
+            EmbedPipeline::default_secure().extract_with_identity(input, &identity)
+        }
+    };
+    #[cfg(not(feature = "pqc"))]
+    let outcome = {
+        let password = read_password()?;
+        EmbedPipeline::default_secure().extract(input, password)
+    };
+
+    // Both modes collapse to the same sentence, and the asymmetric mode does
+    // so on purpose: a wrong identity, a container carrying nothing and a
+    // damaged payload are deliberately one answer. Only the unlock above, over
+    // a file the user owns, is allowed to say more.
+    let outcome = outcome.map_err(|_| EXTRACTION_FAILED.to_string());
 
     // Cleared before the result is inspected, so that the last frame drawn is
     // the same one on both paths.
@@ -1019,6 +1302,109 @@ fn run_extract(input: &Path, payload_out: Option<&Path>, force: bool) -> Result<
         Some(path) => write_recovered_file(path, plaintext.as_slice(), force),
         None => write_recovered_to_stdout(plaintext.as_slice()),
     }
+}
+
+/// Generates a key pair and writes the two files.
+///
+/// The public file is written first: it is the regenerable half, so if the
+/// second write fails the pair is re-made rather than lost.
+///
+/// # Errors
+///
+/// Returns a message naming the step that failed, whether that is a
+/// destination that already exists, the system generator, the sealing of the
+/// private file, or a filesystem refusal.
+#[cfg(feature = "pqc")]
+fn run_keygen(public_path: &Path, private_path: &Path, force: bool) -> Result<(), String> {
+    // Both destinations are settled before a single byte is drawn: a name that
+    // already exists is knowable now, and the generator is the one step of this
+    // command that has nothing to do with the filesystem.
+    refuse_unwritable_output(public_path, force)?;
+    refuse_unwritable_output(private_path, force)?;
+
+    // The guidance is said before the first prompt so that a passphrase is
+    // never typed before the reader knows what it protects.
+    eprint!("{KEY_PASSPHRASE_GUIDANCE}");
+
+    let passphrase = read_local_passphrase(true)?;
+
+    let activity = progress::Activity::start();
+
+    let identity = Identity::generate().map_err(|err| format!("Error: {err}"))?;
+
+    // The seal pays one Argon2id at the production cost; the file passphrase is
+    // exactly the kind of secret that cost exists to stretch, so nothing here
+    // is substituted for speed.
+    let public = identity.recipient().to_public_file();
+    let private = identity
+        .seal(
+            &passphrase,
+            &Argon2Kdf::default_secure(),
+            &XChaCha20Poly1305Cipher::new(),
+        )
+        .map_err(|err| format!("Error: {err}"))?;
+    drop(identity);
+
+    activity.finish();
+
+    // The public key is written with the same `create_new` discipline as any
+    // payload file: an existing name is refused by the open rather than by a
+    // preceding check, so the file that is overwritten is never the file that
+    // was checked.
+    payload::write_payload_file(public_path, public.as_bytes(), force)
+        .map_err(|err| format!("Error: could not write {}: {err}", public_path.display()))?;
+    payload::write_payload_file(private_path, private.as_bytes(), force)
+        .map_err(|err| format!("Error: could not write {}: {err}", private_path.display()))?;
+
+    eprintln!(
+        "\nThe public key is in {}.",
+        public_path.display()
+    );
+    eprintln!(
+        "Send that file to anyone who wants to hide a message for you; it is meant to be published.",
+    );
+    eprintln!(
+        "The private key is in {}. It stays on this machine.",
+        private_path.display()
+    );
+
+    Ok(())
+}
+
+/// Unlocks a private key file, reading its own local passphrase.
+///
+/// The file is read and unlocked as one step rather than existence-checked and
+/// then read: a file that is replaced between the two would be read from the
+/// wrong thing, and this is the one place in the program where a file's
+/// contents are trusted as identity.
+///
+/// # Errors
+///
+/// Returns a message naming the path and why it was refused. A wrong
+/// passphrase is told apart from a damaged file, because the file is the
+/// user's own and the distinction costs nothing to an adversary.
+#[cfg(feature = "pqc")]
+fn read_identity(path: &Path) -> Result<Identity, String> {
+    // The file is read before the passphrase is asked for, so that a mistyped
+    // path costs nothing but the message about it — the same "settled before
+    // the prompt" discipline as everywhere else in this program.
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("Error: could not read {}: {err}", path.display()))?;
+
+    let passphrase = read_local_passphrase(false)?;
+
+    Identity::open(
+        &text,
+        &passphrase,
+        &Argon2Kdf::default_secure(),
+        &XChaCha20Poly1305Cipher::new(),
+    )
+    .map_err(|err| match err {
+        KemError::WrongPassphrase => {
+            format!("Error: the passphrase did not unlock {}.", path.display())
+        }
+        other => format!("Error: {} is not a usable identity: {other}", path.display()),
+    })
 }
 
 /// Refuses a destination that already exists, before the password is asked for.
@@ -1322,10 +1708,17 @@ fn write_artifact(bytes: &[u8], what: &str) -> Result<(), String> {
         .map_err(|err| format!("Error: could not write the {what}: {err}"))
 }
 
-/// Payload bytes `image` can carry, after encryption.
+/// Payload bytes `image` can carry after encryption, and the salt its
+/// perceptual hash derives.
 ///
 /// `None` when a layer above the loader refuses the container, which is a
 /// verdict of "unusable" rather than a capacity of zero.
+///
+/// The salt is returned rather than discarded because the gate below already
+/// computes it, and because it is the only thing that can tell a caller holding
+/// two containers that they are one container: the key and the nonce come from
+/// this value and the password, so two images that produce it are
+/// indistinguishable to the derivation. `scan` uses it for exactly that.
 ///
 /// # Why the hash is checked here and not only the cost map
 ///
@@ -1339,12 +1732,15 @@ fn write_artifact(bytes: &[u8], what: &str) -> Result<(), String> {
 /// That makes the hash a load-bearing part of the answer rather than a detail
 /// of the embedding path: without it `scan` would report a smooth photograph as
 /// a usable container and `embed` would refuse the very same file.
-fn container_capacity(image: &ImageBuffer) -> Option<usize> {
-    compute_stable_phash(image).ok()?;
+fn analyse_container(image: &ImageBuffer) -> Option<(usize, PHashSalt)> {
+    let salt = compute_stable_phash(image).ok()?;
 
     let cost_map = HillCostProvider::new().compute(image).ok()?;
 
-    Some(compute_capacity(&cost_map, EmbeddingMode::Symmetric).available_bytes())
+    Some((
+        compute_capacity(&cost_map, EmbeddingMode::Symmetric).available_bytes(),
+        salt,
+    ))
 }
 
 /// Whether the terminal can be expected to render the marks `scan` prints.
@@ -1968,21 +2364,54 @@ mod tests {
                     input,
                     width,
                     height,
+                    #[cfg(feature = "pqc")]
+                    recipient,
+                    force,
+                } => {
+                    #[cfg(feature = "pqc")]
+                    let recipient = match recipient {
+                        Some(path) => format!(" recipient={}", path.display()),
+                        None => String::new(),
+                    };
+                    #[cfg(not(feature = "pqc"))]
+                    let recipient = String::new();
+                    write!(
+                        formatter,
+                        "generate {} {input:?} {width}x{height} force={force}{recipient}",
+                        output.display()
+                    )
+                }
+                #[cfg(feature = "pqc")]
+                Command::Keygen {
+                    public,
+                    private,
                     force,
                 } => write!(
                     formatter,
-                    "generate {} {input:?} {width}x{height} force={force}",
-                    output.display()
+                    "keygen {} {} force={force}",
+                    public.display(),
+                    private.display()
                 ),
                 Command::Extract {
                     input,
+                    #[cfg(feature = "pqc")]
+                    identity,
                     payload_out,
                     force,
-                } => write!(
-                    formatter,
-                    "extract {} {payload_out:?} force={force}",
-                    input.display()
-                ),
+                } => {
+                    #[cfg(feature = "pqc")]
+                    let identity = match identity {
+                        Some(path) => format!(" identity={}", path.display()),
+                        None => String::new(),
+                    };
+                    #[cfg(not(feature = "pqc"))]
+                    let identity = String::new();
+                    write!(
+                        formatter,
+                        "extract {} {payload_out:?} force={force}{identity}",
+                        input.display()
+                    )
+                }
                 Command::Completions { shell } => write!(formatter, "completions {shell}"),
                 Command::Man => write!(formatter, "man"),
             }

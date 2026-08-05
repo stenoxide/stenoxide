@@ -22,6 +22,7 @@ use std::path::Path;
 use image::{codecs::png::PngDecoder, ColorType, DynamicImage, ImageDecoder};
 
 use crate::image_io::buffer::{ColorSpace, ImageBuffer};
+use crate::image_io::envelope::PngEnvelope;
 use crate::image_io::jpeg_detect;
 
 /// Minimum accepted side length, in pixels.
@@ -207,6 +208,7 @@ struct DecodedPng {
     width: u32,
     height: u32,
     color_space: ColorSpace,
+    envelope: PngEnvelope,
 }
 
 /// Transition 1 — identifies the container format from its magic number.
@@ -372,7 +374,14 @@ pub fn probe_geometry(path: &Path) -> Result<ImageGeometry, ValidationError> {
 /// Dimensions and colour type are read from the decoder header before the
 /// pixel data is expanded, so an image of the wrong size or with an unusable
 /// layout is rejected without paying for a full decode.
+///
+/// The envelope is read off the same bytes on the way past, because this is the
+/// last state that still holds the file rather than the picture. It is not a
+/// gate and cannot become one: [`PngEnvelope::read`] has no failure to report,
+/// so an image that decodes is accepted whatever its wrapper looked like.
 fn decode_png(file: VerifiedPngFile) -> Result<DecodedPng, ValidationError> {
+    let envelope = PngEnvelope::read(&file.0);
+
     let decoder = PngDecoder::new(Cursor::new(file.0))
         .map_err(|err| ValidationError::DecodingError(err.to_string()))?;
 
@@ -418,6 +427,7 @@ fn decode_png(file: VerifiedPngFile) -> Result<DecodedPng, ValidationError> {
         width,
         height,
         color_space,
+        envelope,
     })
 }
 
@@ -432,11 +442,18 @@ fn validate_no_jpeg_artifacts(decoded: DecodedPng) -> Result<ImageBuffer, Valida
         width,
         height,
         color_space,
+        envelope,
     } = decoded;
 
     match jpeg_detect::detect_jpeg_artifacts(&pixels, width, height, color_space) {
         Some(ratio) => Err(ValidationError::JpegArtifactsDetected { ratio }),
-        None => Ok(ImageBuffer::new(pixels, width, height, color_space)),
+        None => Ok(ImageBuffer::with_envelope(
+            pixels,
+            width,
+            height,
+            color_space,
+            envelope,
+        )),
     }
 }
 

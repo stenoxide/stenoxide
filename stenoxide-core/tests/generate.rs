@@ -42,6 +42,10 @@ use stenoxide_core::cost::CostProvider;
 use stenoxide_core::crypto::aead::XChaCha20Poly1305Cipher;
 use stenoxide_core::crypto::expand::expand_master_key;
 use stenoxide_core::crypto::kdf::{Argon2Kdf, KeyDeriver};
+#[cfg(feature = "pqc")]
+use stenoxide_core::crypto::kem::Identity;
+#[cfg(feature = "pqc")]
+use stenoxide_core::generate::generate_container_for_recipient;
 use stenoxide_core::generate::{generate_container_with_deriver, ContainerDimensions};
 use stenoxide_core::image_io::buffer::CoverSource;
 use stenoxide_core::image_io::jpeg_detect::detect_jpeg_artifacts;
@@ -365,4 +369,90 @@ fn two_generations_share_neither_their_samples_nor_their_keys() {
         .extract(twin_container(), secret(PASSWORD))
         .expect("the second container must round trip on its own key");
     assert_eq!(plaintext.as_slice(), MESSAGE);
+}
+
+/// TEST 8 — a container built for a recipient gives its message back.
+///
+/// The whole mode in one call each way, driven as a caller drives it: generate
+/// against the published public key, recover with the identity. Everything is
+/// production — the cipher, the hash, the gates — and only the key deriver is
+/// substituted, a decision this mode never reaches. The container and the
+/// identity are shared rather than built per test, for the same reason
+/// [`shared_container`] is.
+#[cfg(feature = "pqc")]
+#[test]
+fn a_recipient_container_round_trips() {
+    let (plaintext, _report) = test_pipeline()
+        .extract_with_identity(recipient_container(), shared_identity())
+        .expect("the right identity must recover the payload");
+
+    assert_eq!(plaintext.as_slice(), MESSAGE);
+}
+
+/// A container built for the shared identity, once per test binary.
+#[cfg(feature = "pqc")]
+fn recipient_container() -> &'static Path {
+    static CONTAINER: OnceLock<PathBuf> = OnceLock::new();
+
+    CONTAINER.get_or_init(|| {
+        let directory = support::fixtures_dir();
+        std::fs::create_dir_all(&directory).expect("fixtures directory should be creatable");
+        let path = directory.join("generated_recipient.png");
+
+        let report = generate_container_for_recipient(
+            Zeroizing::new(MESSAGE.to_vec()),
+            &shared_identity().recipient(),
+            ContainerDimensions::default(),
+            &path,
+        )
+        .expect("a payload within capacity must generate a container");
+
+        assert_eq!(report.image_dimensions, (2000, 2000));
+        assert!(
+            report.payload_bytes <= report.capacity_bytes,
+            "the generator must refuse rather than overfill"
+        );
+
+        path
+    })
+}
+
+/// An identity the recipient tests share.
+#[cfg(feature = "pqc")]
+fn shared_identity() -> &'static Identity {
+    static IDENTITY: OnceLock<Identity> = OnceLock::new();
+
+    IDENTITY.get_or_init(|| Identity::generate().expect("the system generator must be readable"))
+}
+
+/// A wrong identity fails with the same error value a wrong password fails
+/// with.
+///
+/// The property that keeps the asymmetric mode from being an oracle for which
+/// identity a container belongs to: ML-KEM decapsulation is total, so a wrong
+/// identity costs the same work and dies at the same Poly1305 tag. TEST 6
+/// compares the *sentences* of the two constructions; this asserts the error
+/// value the pipeline hands a caller to match on, which is the same value every
+/// other recoverable failure produces.
+#[cfg(feature = "pqc")]
+#[test]
+fn a_wrong_identity_fails_identically_to_a_wrong_password() {
+    let stranger = Identity::generate().expect("the system generator must be readable");
+
+    let error = test_pipeline()
+        .extract_with_identity(recipient_container(), &stranger)
+        .map(|_| ())
+        .expect_err("a wrong identity must not recover the payload");
+
+    assert!(
+        matches!(
+            error,
+            stenoxide_core::pipeline::error::PipelineError::Crypto(
+                stenoxide_core::crypto::aead::CryptoError::AEADError(
+                    stenoxide_core::crypto::aead::AEADError::AuthenticationFailed
+                )
+            )
+        ),
+        "a wrong identity must fail as an authentication failure, got: {error:?}"
+    );
 }

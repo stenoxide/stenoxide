@@ -39,6 +39,54 @@ narrow guarantee, and it is described under [Generate](#generate).
    rate is capped at 0.02 bits per pixel, a compile-time constant rather than a
    parameter a caller can raise.
 
+## The file envelope
+
+Everything above works on pixels, and a stego image is more than its pixels. A
+PNG is a signature followed by a chain of chunks — four bytes of length, four of
+type, the data, four of CRC — and of those, only `IDAT` carries the image. The
+rest say how to read it, or where it came from, or are simply absent; and *which*
+of the three is the case identifies the program that wrote the file almost as
+cleanly as a watermark.
+
+Two properties used to give a container away without any steganalysis at all:
+the auxiliary chunks that an ordinary export carries (`gAMA`, `sRGB`, `pHYs`,
+often `iCCP`) were missing from a re-encoded file, and the whole pixel stream
+was packed into a single `IDAT`, where photographic software emits thousands of
+pieces of 8192 bytes. A hex viewer was enough to tell the difference.
+
+Both are now taken from the container itself. When the image is loaded, its
+envelope is recorded — the technical chunks and the size its pixel stream was
+cut into — and the file written back out reproduces them: the same chunks, in
+the same order, ahead of the pixels, and an `IDAT` stream split into pieces of
+the same size, every one full except the last. A container this tool draws
+itself has no original to copy, and is wrapped in the profile an ordinary
+exporter would write instead.
+
+Not every chunk is reproduced, and the whitelist is not configurable:
+
+- **Preserved** — the chunks that say how to interpret the samples: `gAMA`,
+  `sRGB`, `cHRM`, `pHYs`, `iCCP`, `sBIT`.
+- **Dropped, always** — everything that carries provenance or personal data:
+  `eXIf`, `tEXt`, `iTXt`, `zTXt`, `tIME`. An EXIF block with GPS coordinates
+  does not travel with the stego image, whatever its photographer did with the
+  original.
+- **Dropped, by default** — any chunk this list does not name, so a chunk type
+  that did not exist when the tool was written cannot smuggle data out.
+
+That leaves a residue, and it is acknowledged rather than hidden: an export
+whose EXIF and text chunks have gone missing is not quite an ordinary export.
+It is the cost of never sending somebody's location, camera or name along with
+the message, and there is no flag that trades it back.
+
+**One rule follows from the whitelist, and it is a hard rule: do not use this
+tool to re-encode.** When the job is producing copies of an original — convert a
+folder to PNG, strip metadata, downscale for the web — the rewrite of the file
+is exactly what `embed` does as a side effect, and the file that comes out of it
+is no longer a faithful copy. `scan` reports the envelope of a container, so the
+residue is visible before you commit to it; but re-encoding is not this tool's
+purpose, and nothing it writes should be kept as a general-purpose copy of a
+photograph.
+
 ## Security model
 
 **What it protects.** The payload is encrypted and authenticated, so an attacker

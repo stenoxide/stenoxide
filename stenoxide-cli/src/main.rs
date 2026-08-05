@@ -348,9 +348,10 @@ enum Command {
         /// Written to standard output when absent. A directory receives a file
         /// named after the type of the content; a path without an extension is
         /// given one.
-        ///
-        /// Its short form is -o, the letter every subcommand uses for where the
-        /// result goes.
+        // Its short form is `-o` because that is the letter for where the
+        // result goes; see the map on the enum. It is not spelled out in the
+        // help the way `generate --input` is, because there the letter does not
+        // match the long form and here it does.
         #[arg(long, short = 'o', value_name = "PATH")]
         payload_out: Option<PathBuf>,
         /// Overwrite the output file if it already exists.

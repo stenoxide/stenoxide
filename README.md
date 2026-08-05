@@ -102,6 +102,12 @@ container before asking for anything, so an unusable image is refused before you
 type a passphrase — and so is a payload path that cannot be read, or a
 destination that cannot receive the file.
 
+The paths every subcommand takes have short forms, and a letter means the same
+thing wherever it appears: `-i` is the image being read, `-o` is where the result
+goes, `-p` is the file to hide, `-f` is `--force`. That is why `generate --input`
+abbreviates to `-p` and not to `-i` — it names the file being hidden, not an
+image. `-h` is always `--help`, so `--width` and `--height` have no short forms.
+
 ### Scan
 
 Whether a photo can be used as a container is not something you can tell by

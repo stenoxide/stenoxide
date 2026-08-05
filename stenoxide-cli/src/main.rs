@@ -229,6 +229,31 @@ struct Cli {
 }
 
 /// The operations the front-end exposes.
+///
+/// # The short flags, and the collision they had to resolve
+///
+/// A letter means the same thing in every subcommand that has it. That rule is
+/// worth more than covering every flag, because a short form is memorised once
+/// and typed everywhere, and one that meant two things would be worse than none.
+///
+/// `--input` already means three things. In `embed` it is the container, in
+/// `extract` it is the stego image, and in `generate` it is the file to hide.
+/// Giving all three `-i` would have set that inconsistency in a single letter.
+/// Renaming any of the long forms was not an option — they are the interface
+/// this program already shipped — so the letters follow the *meaning*:
+///
+/// - `-i` — the image being read: `embed --input`, `extract --input`. Never
+///   `generate`, which reads no image.
+/// - `-o` — where the result of the operation goes: `embed --output`,
+///   `generate --output`, `extract --payload-out`.
+/// - `-p` — the file to hide: `embed --payload`, and `generate --input`, where
+///   the letter does not match the long form but does match what the flag is
+///   for, which is the thing being fixed.
+/// - `-f` — `--force`, everywhere it exists.
+///
+/// `-h` is `--help` and is never taken. That rules out a short form for
+/// `generate --height`, and `--width` goes without one too rather than leave a
+/// pair of flags where one half is abbreviated and the other is not.
 #[derive(Subcommand)]
 enum Command {
     /// Report which images can be used as containers, and how much each can
@@ -239,7 +264,7 @@ enum Command {
         /// Container image: the photo the message is hidden inside. Must be a
         /// PNG of at least 2000x2000 pixels that has never been
         /// JPEG-compressed.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, short = 'i', value_name = "PATH")]
         input: PathBuf,
         // Why there is no default, and why one will not be added. A name
         // derived from the container — cover.png becoming cover.stego.png —
@@ -253,14 +278,14 @@ enum Command {
         /// included. Always written as PNG. There is no default, because a name
         /// derived from the container would record the link between the two on
         /// disk.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, short = 'o', value_name = "PATH")]
         output: PathBuf,
         /// File to hide. Read from standard input when absent; when given,
         /// standard input is not read at all and any redirection is ignored.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, short = 'p', value_name = "PATH")]
         payload: Option<PathBuf>,
         /// Overwrite the output file if it already exists.
-        #[arg(long)]
+        #[arg(long, short = 'f')]
         force: bool,
     },
     /// Build a container around a message, for when there is no usable photo.
@@ -268,11 +293,14 @@ enum Command {
     Generate {
         /// Where to write the container: the full path, file name included.
         /// Always written as PNG.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, short = 'o', value_name = "PATH")]
         output: PathBuf,
         /// File to hide. Read from standard input when absent; when given,
         /// standard input is not read at all and any redirection is ignored.
-        #[arg(long, value_name = "PATH")]
+        ///
+        /// Its short form is -p, the letter every subcommand uses for the file
+        /// being hidden, rather than -i, which is the image being read.
+        #[arg(long, short = 'p', value_name = "PATH")]
         input: Option<PathBuf>,
         /// Width of the container to draw, in pixels. Defaults to 2000, the
         /// smallest — and least conspicuous — the mode will produce; raise it,
@@ -288,23 +316,26 @@ enum Command {
               value_parser = clap::value_parser!(u32).range(i64::from(MIN_CONTAINER_SIDE)..))]
         height: u32,
         /// Overwrite the output file if it already exists.
-        #[arg(long)]
+        #[arg(long, short = 'f')]
         force: bool,
     },
     /// Recover a hidden message from a stego image and write it to standard
     /// output.
     Extract {
         /// The stego image to read.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, short = 'i', value_name = "PATH")]
         input: PathBuf,
         /// Where to write the recovered payload, the hidden file or message.
         /// Written to standard output when absent. A directory receives a file
         /// named after the type of the content; a path without an extension is
         /// given one.
-        #[arg(long, value_name = "PATH")]
+        ///
+        /// Its short form is -o, the letter every subcommand uses for where the
+        /// result goes.
+        #[arg(long, short = 'o', value_name = "PATH")]
         payload_out: Option<PathBuf>,
         /// Overwrite the output file if it already exists.
-        #[arg(long, requires = "payload_out")]
+        #[arg(long, short = 'f', requires = "payload_out")]
         force: bool,
     },
     /// Write a shell completion script to standard output.
@@ -1769,6 +1800,166 @@ mod tests {
             ),
             "embed must still parse into the same three paths"
         );
+    }
+
+    /// Every short flag parses to exactly what its long form parses to.
+    ///
+    /// Written as whole command lines rather than as a table of letters,
+    /// because what has to hold is that the two spellings are interchangeable —
+    /// a short form attached to the wrong field would still be a valid flag and
+    /// would still parse, and only the value it lands in tells them apart. The
+    /// short line is built by substitution, so the two differ in nothing else.
+    #[test]
+    fn every_short_flag_means_what_its_long_form_means() {
+        let cases: &[(&[&str], &[&str])] = &[
+            (
+                &[
+                    "stenoxide",
+                    "embed",
+                    "--input",
+                    "cover.png",
+                    "--output",
+                    "stego.png",
+                    "--payload",
+                    "secret.zip",
+                    "--force",
+                ],
+                &[
+                    "stenoxide", "embed", "-i", "cover.png", "-o", "stego.png", "-p", "secret.zip",
+                    "-f",
+                ],
+            ),
+            (
+                &[
+                    "stenoxide",
+                    "extract",
+                    "--input",
+                    "stego.png",
+                    "--payload-out",
+                    "secret.zip",
+                    "--force",
+                ],
+                &[
+                    "stenoxide",
+                    "extract",
+                    "-i",
+                    "stego.png",
+                    "-o",
+                    "secret.zip",
+                    "-f",
+                ],
+            ),
+            (
+                &[
+                    "stenoxide",
+                    "generate",
+                    "--output",
+                    "container.png",
+                    "--input",
+                    "message.txt",
+                    "--force",
+                ],
+                &[
+                    "stenoxide",
+                    "generate",
+                    "-o",
+                    "container.png",
+                    "-p",
+                    "message.txt",
+                    "-f",
+                ],
+            ),
+            (
+                &["stenoxide", "scan", "./photos", "--all", "--recursive"],
+                &["stenoxide", "scan", "./photos", "-a", "-r"],
+            ),
+        ];
+
+        for (long, short) in cases {
+            let spelled_out = Cli::try_parse_from(*long).map(|cli| format!("{:?}", Rendered(&cli)));
+            let abbreviated = Cli::try_parse_from(*short).map(|cli| format!("{:?}", Rendered(&cli)));
+
+            assert_eq!(
+                spelled_out.as_deref().ok(),
+                abbreviated.as_deref().ok(),
+                "{short:?} must parse to what {long:?} parses to"
+            );
+            assert!(spelled_out.is_ok(), "{long:?} stopped parsing");
+        }
+    }
+
+    /// Every field of a parsed command line, as text two parses can be compared
+    /// on.
+    ///
+    /// `Command` carries paths and flags and derives nothing, and deriving
+    /// `Debug` on it for the sake of one test would put a formatter on a type
+    /// that holds the user's file names. Rendering it here keeps that where the
+    /// test is.
+    struct Rendered<'cli>(&'cli Cli);
+
+    impl std::fmt::Debug for Rendered<'_> {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match &self.0.command {
+                Command::Scan(args) => write!(
+                    formatter,
+                    "scan {} all={} recursive={} json={}",
+                    args.path, args.all, args.recursive, args.json
+                ),
+                Command::Embed {
+                    input,
+                    output,
+                    payload,
+                    force,
+                } => write!(
+                    formatter,
+                    "embed {} {} {payload:?} force={force}",
+                    input.display(),
+                    output.display()
+                ),
+                Command::Generate {
+                    output,
+                    input,
+                    width,
+                    height,
+                    force,
+                } => write!(
+                    formatter,
+                    "generate {} {input:?} {width}x{height} force={force}",
+                    output.display()
+                ),
+                Command::Extract {
+                    input,
+                    payload_out,
+                    force,
+                } => write!(
+                    formatter,
+                    "extract {} {payload_out:?} force={force}",
+                    input.display()
+                ),
+                Command::Completions { shell } => write!(formatter, "completions {shell}"),
+                Command::Man => write!(formatter, "man"),
+            }
+        }
+    }
+
+    /// `-h` is `--help` in every subcommand, and nothing else ever takes it.
+    ///
+    /// The one letter that cannot be reassigned: a user who types it expects the
+    /// help, and `generate --height` is exactly the flag that would have been
+    /// tempting to give it to.
+    #[test]
+    fn the_help_letter_is_never_reassigned() {
+        for subcommand in ["scan", "embed", "extract", "generate"] {
+            let outcome = Cli::try_parse_from(["stenoxide", subcommand, "-h"])
+                .err()
+                .map(|error| error.kind());
+
+            assert_eq!(
+                outcome,
+                Some(clap::error::ErrorKind::DisplayHelp),
+                "-h must print the help of {subcommand}"
+            );
+        }
     }
 
     /// A directory is refused as an output, and `--force` does not change that.

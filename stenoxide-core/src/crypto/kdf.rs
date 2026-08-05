@@ -85,13 +85,28 @@ impl MasterKey {
 /// `Send + Sync` because the pipeline may hold a deriver behind a shared
 /// reference while worker threads are running.
 pub trait KeyDeriver: Send + Sync {
-    /// Derives a master key from `password`, salted with the container hash.
+    /// Derives a master key from `password` and an arbitrary salt.
+    ///
+    /// The general form, and the only one an implementor has to write. Most of
+    /// this crate salts with the container's perceptual hash and reaches for
+    /// [`KeyDeriver::derive`] instead; the exception is the passphrase that
+    /// protects a private key file, where there is no container and the salt is
+    /// read from the file.
     ///
     /// # Errors
     ///
     /// Returns [`KdfError::EmptyPassword`] if `password` has no bytes, and
     /// [`KdfError::Argon2Error`] if the underlying implementation fails.
-    fn derive(&self, password: &[u8], salt: &PHashSalt) -> Result<MasterKey, KdfError>;
+    fn derive_with_salt(&self, password: &[u8], salt: &[u8]) -> Result<MasterKey, KdfError>;
+
+    /// Derives a master key from `password`, salted with the container hash.
+    ///
+    /// # Errors
+    ///
+    /// As [`KeyDeriver::derive_with_salt`].
+    fn derive(&self, password: &[u8], salt: &PHashSalt) -> Result<MasterKey, KdfError> {
+        self.derive_with_salt(password, salt.as_bytes())
+    }
 }
 
 /// The production key deriver: Argon2id with compiled-in cost parameters.
@@ -135,7 +150,7 @@ impl Argon2Kdf {
 }
 
 impl KeyDeriver for Argon2Kdf {
-    fn derive(&self, password: &[u8], salt: &PHashSalt) -> Result<MasterKey, KdfError> {
+    fn derive_with_salt(&self, password: &[u8], salt: &[u8]) -> Result<MasterKey, KdfError> {
         if password.is_empty() {
             return Err(KdfError::EmptyPassword);
         }
@@ -149,7 +164,7 @@ impl KeyDeriver for Argon2Kdf {
 
         let mut bytes = [0u8; MASTER_KEY_LEN];
         let outcome = argon2
-            .hash_password_into(password, salt.as_bytes(), &mut bytes)
+            .hash_password_into(password, salt, &mut bytes)
             .map_err(|err| KdfError::Argon2Error(err.to_string()));
 
         // `bytes` is copied into the key rather than moved, so the local array
@@ -194,6 +209,29 @@ mod tests {
         assert_ne!(first.as_bytes(), other_password.as_bytes());
         assert_ne!(first.as_bytes(), other_salt.as_bytes());
         assert_eq!(first.as_bytes().len(), MASTER_KEY_LEN);
+    }
+
+    /// The container salt is the general salt, not a different code path.
+    ///
+    /// [`KeyDeriver::derive`] is a thin default over
+    /// [`KeyDeriver::derive_with_salt`], and this is what holds that down: a
+    /// hash used as a salt must stretch to exactly what the same bytes stretch
+    /// to when they arrive as a plain slice. If the two ever diverged, a
+    /// container written by one and read by the other would be unrecoverable.
+    #[test]
+    fn the_container_salt_is_the_general_salt() {
+        let kdf = Argon2Kdf::low_cost_for_tests();
+
+        let through_hash = kdf.derive(b"passphrase", &salt(3)).expect("must derive");
+        let through_slice = kdf
+            .derive_with_salt(b"passphrase", &[3u8; 32])
+            .expect("must derive");
+        let other_salt = kdf
+            .derive_with_salt(b"passphrase", &[4u8; 32])
+            .expect("must derive");
+
+        assert_eq!(through_hash.as_bytes(), through_slice.as_bytes());
+        assert_ne!(through_hash.as_bytes(), other_salt.as_bytes());
     }
 
     /// An empty password is refused rather than stretched.

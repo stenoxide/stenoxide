@@ -25,6 +25,18 @@ use zeroize::Zeroizing;
 /// that one associated string covers everything this crate encrypts.
 pub(crate) const STENOXIDE_AAD: &[u8] = b"STENOXIDE-v1";
 
+/// Associated data bound into the tag of a passphrase-protected private key
+/// file.
+///
+/// A second string rather than [`STENOXIDE_AAD`] because the two protect
+/// different things under keys derived the same way: one is a payload hidden in
+/// a container, the other is a key file sitting on the owner's disk. Binding
+/// them apart means a container's ciphertext handed to the key-file reader — or
+/// the reverse — fails authentication instead of being decrypted into
+/// something that has to be judged afterwards.
+#[cfg(feature = "pqc")]
+pub(crate) const STENOXIDE_IDENTITY_AAD: &[u8] = b"STENOXIDE-identity-v1";
+
 /// Zstandard compression level. The maximum non-ultra level: the payload is
 /// small and compressed exactly once, so spending time here is free compared
 /// with the embedding capacity it buys back.

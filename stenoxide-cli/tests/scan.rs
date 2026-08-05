@@ -161,7 +161,9 @@ fn a_mixed_directory_lists_the_usable_images_and_hides_the_rest() {
     let full = stdout_of(&stenoxide(&["scan", &path, "--all"]));
     assert!(full.contains("usable.png"), "got: {full}");
     assert!(full.contains("small.png"), "got: {full}");
-    assert!(full.contains("ImageTooSmall 400x400"), "got: {full}");
+    // The dimensions and the reason are both reported, in their own columns.
+    assert!(full.contains("400x400"), "got: {full}");
+    assert!(full.contains("ImageTooSmall"), "got: {full}");
     assert!(full.contains("photo.jpg"), "got: {full}");
     assert!(full.contains("UnsupportedFormat"), "got: {full}");
     assert!(

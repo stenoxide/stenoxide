@@ -36,15 +36,26 @@ const PNG_EXTENSION: &str = "png";
 /// Bytes in a kibibyte, named where the conversion happens.
 const BYTES_PER_KIB: f64 = 1024.0;
 
-/// Column width of the path in the default listing.
-///
-/// Wide enough for a relative path a person would type; longer paths push the
-/// rest of the line right rather than being truncated, because a shortened path
-/// is not a path the user can act on.
-const PATH_COLUMN: usize = 28;
+/// Heading of the path column.
+const PATH_HEADING: &str = "PATH";
 
-/// Column width of the dimensions in the default listing.
-const SIZE_COLUMN: usize = 11;
+/// Heading of the dimensions column.
+const SIZE_HEADING: &str = "SIZE";
+
+/// Heading of the last column when every listed file is a usable container.
+///
+/// The asterisk is what the note under the listing refers to. Before there were
+/// headings that note pointed at nothing: it explained a mark no row carried.
+const CAPACITY_HEADING: &str = "PAYLOAD*";
+
+/// Heading of the last column when usable and rejected files are listed
+/// together.
+const CAPACITY_AND_REASON_HEADING: &str = "PAYLOAD* / REASON";
+
+/// Heading of the last column when nothing listed is usable.
+///
+/// No asterisk, because no row carries a capacity and the note is not printed.
+const REASON_HEADING: &str = "REASON";
 
 /// What a scan that accepted nothing says at the end of its summary.
 ///
@@ -501,19 +512,62 @@ fn describe(
     }
 }
 
-/// The human-readable report.
-fn render_listing(argument: &str, entries: &[Entry], all: bool) -> String {
-    let (usable_mark, unusable_mark) = if terminal_renders_unicode() {
+/// The pair of marks a listing prints, as `(usable, unusable)`.
+type Marks = (&'static str, &'static str);
+
+/// One line of the listing, reduced to the columns it prints.
+///
+/// Both verdicts produce the same four columns, which is what makes the listing
+/// one table instead of two interleaved ones. A file that did not decode far
+/// enough to have dimensions leaves that column empty rather than shifting
+/// everything after it left.
+struct Row {
+    /// The verdict mark.
+    mark: &'static str,
+    /// Path as the user would type it.
+    path: String,
+    /// Dimensions as `WxH`, or empty.
+    size: String,
+    /// Capacity for a usable container, the reason for a rejected file.
+    detail: String,
+}
+
+/// The marks this terminal can be expected to render.
+fn listing_marks() -> Marks {
+    if terminal_renders_unicode() {
         ("\u{2713}", "\u{2717}")
     } else {
         ("[OK]", "[--]")
-    };
+    }
+}
 
-    let mut report = String::new();
-    let _ = writeln!(report, "Scanning {argument} ...\n");
+/// The human-readable report.
+fn render_listing(argument: &str, entries: &[Entry], all: bool) -> String {
+    render_listing_with(listing_marks(), argument, entries, all)
+}
+
+/// The human-readable report, with the marks decided by the caller.
+///
+/// Split from [`render_listing`] so that both mark sets can be exercised from a
+/// test. It is not a cosmetic difference: the ASCII marks are four characters
+/// wide and the Unicode ones are one, so every column position in the listing
+/// depends on which pair is in use, and a console that is not running UTF-8 —
+/// the ordinary case on Windows — only ever sees the wider of the two.
+///
+/// # Why the widths are measured rather than fixed
+///
+/// A constant column width holds until a path is longer than it, and then the
+/// column stops existing for that row and every row after it. Truncating the
+/// path instead is not an option, and never was: a shortened path is not a path
+/// the user can act on. So the width is the widest value the listing actually
+/// carries, which keeps the original decision and removes the failure.
+fn render_listing_with(marks: Marks, argument: &str, entries: &[Entry], all: bool) -> String {
+    let (usable_mark, unusable_mark) = marks;
 
     let mut usable = 0usize;
     let mut unusable = 0usize;
+    let mut rows: Vec<Row> = Vec::new();
+    let mut rejected: Vec<Row> = Vec::new();
 
     for entry in entries {
         let path = entry.path.display().to_string();
@@ -524,12 +578,12 @@ fn render_listing(argument: &str, entries: &[Entry], all: bool) -> String {
                 capacity_bytes,
             } => {
                 usable += 1;
-                let size = format!("{width}x{height}");
-                let capacity = *capacity_bytes as f64 / BYTES_PER_KIB;
-                let _ = writeln!(
-                    report,
-                    "  {usable_mark} {path:<PATH_COLUMN$} {size:<SIZE_COLUMN$} ~{capacity:.1} KB payload"
-                );
+                rows.push(Row {
+                    mark: usable_mark,
+                    path,
+                    size: format!("{width}x{height}"),
+                    detail: format!("~{:.1} KB", *capacity_bytes as f64 / BYTES_PER_KIB),
+                });
             }
             Verdict::Unusable { reason, dimensions } => {
                 unusable += 1;
@@ -537,15 +591,62 @@ fn render_listing(argument: &str, entries: &[Entry], all: bool) -> String {
                     continue;
                 }
 
-                let size = dimensions
-                    .map(|(width, height)| format!(" {width}x{height}"))
-                    .unwrap_or_default();
-                let _ = writeln!(
-                    report,
-                    "  {unusable_mark} {path:<PATH_COLUMN$} {reason}{size}"
-                );
+                rejected.push(Row {
+                    mark: unusable_mark,
+                    path,
+                    size: dimensions
+                        .map(|(width, height)| format!("{width}x{height}"))
+                        .unwrap_or_default(),
+                    detail: (*reason).to_owned(),
+                });
             }
         }
+    }
+
+    // Usable first, rejected after, alphabetical within each group because that
+    // is the order the entries arrive in. Interleaved, ten containers among
+    // twenty refusals are ten lines the reader has to find; grouped, they are
+    // the top of the listing. Sorting the usable ones by capacity was considered
+    // and dropped: it turns a directory listing into a ranking, and the reader
+    // is usually looking for a file whose name they already know.
+    let listed_rejections = !rejected.is_empty();
+    rows.append(&mut rejected);
+
+    let detail_heading = match (usable > 0, listed_rejections) {
+        (true, true) => CAPACITY_AND_REASON_HEADING,
+        (true, false) => CAPACITY_HEADING,
+        (false, _) => REASON_HEADING,
+    };
+
+    let mark_width = usable_mark
+        .chars()
+        .count()
+        .max(unusable_mark.chars().count());
+    let path_width = column_width(PATH_HEADING, rows.iter().map(|row| row.path.as_str()));
+    let size_width = column_width(SIZE_HEADING, rows.iter().map(|row| row.size.as_str()));
+
+    let mut report = String::new();
+    let _ = writeln!(report, "Scanning {argument} ...\n");
+
+    if !rows.is_empty() {
+        let _ = writeln!(
+            report,
+            "  {blank:<mark_width$} {PATH_HEADING:<path_width$} {SIZE_HEADING:<size_width$} {detail_heading}",
+            blank = ""
+        );
+    }
+
+    for Row {
+        mark,
+        path,
+        size,
+        detail,
+    } in &rows
+    {
+        let _ = writeln!(
+            report,
+            "  {mark:<mark_width$} {path:<path_width$} {size:<size_width$} {detail}"
+        );
     }
 
     let scanned = usable + unusable;
@@ -572,6 +673,19 @@ fn render_listing(argument: &str, entries: &[Entry], all: bool) -> String {
     }
 
     report
+}
+
+/// The width a column needs: its heading, or the widest value under it.
+///
+/// Counted in characters rather than in bytes, which is what the formatter pads
+/// by. It is not the same as the width a terminal draws for a path holding
+/// double-width characters, and deliberately not corrected for: the alternative
+/// is a Unicode width table, and a listing that is one column out on a CJK file
+/// name is a far smaller problem than the one this replaces.
+fn column_width<'value>(heading: &str, values: impl Iterator<Item = &'value str>) -> usize {
+    values.fold(heading.chars().count(), |widest, value| {
+        widest.max(value.chars().count())
+    })
 }
 
 /// The machine-readable report.
@@ -648,6 +762,10 @@ fn escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    // A test that cannot panic cannot fail, so the crate-wide ban is lifted
+    // here and only here.
+    #![allow(clippy::panic)]
+
     use super::*;
 
     /// The fixed head of a pattern is a path and is kept whole.
@@ -793,6 +911,33 @@ mod tests {
         assert!(rendered.contains("\"invalid\": 1"), "got: {rendered}");
     }
 
+    /// The two mark sets, which are four characters wide and one.
+    const MARK_SETS: [Marks; 2] = [("\u{2713}", "\u{2717}"), ("[OK]", "[--]")];
+
+    /// The lines of a listing that carry a mark or a heading.
+    ///
+    /// Everything from the blank line after the header down to the blank line
+    /// before the summary: the table itself, which is the only part the widths
+    /// apply to.
+    fn table_of(rendered: &str) -> Vec<&str> {
+        rendered
+            .lines()
+            .skip_while(|line| !line.starts_with("  "))
+            .take_while(|line| !line.trim().is_empty())
+            .collect()
+    }
+
+    /// Where `needle` starts in `line`, counted in characters.
+    ///
+    /// Characters rather than bytes, because that is what the formatter pads by
+    /// and therefore what "the same column" means here.
+    fn offset_of(line: &str, needle: &str) -> usize {
+        match line.find(needle) {
+            Some(byte) => line[..byte].chars().count(),
+            None => panic!("{needle:?} is not in {line:?}"),
+        }
+    }
+
     /// The listing names every file it examined and counts them.
     #[test]
     fn the_listing_reports_every_entry() {
@@ -818,15 +963,301 @@ mod tests {
         assert!(rendered.contains("Scanning ./photos"), "got: {rendered}");
         assert!(rendered.contains("photos/good.png"), "got: {rendered}");
         assert!(rendered.contains("3840x2160"), "got: {rendered}");
-        assert!(rendered.contains("74.2 KB payload"), "got: {rendered}");
-        assert!(
-            rendered.contains("ImageTooSmall 400x400"),
-            "got: {rendered}"
-        );
+        assert!(rendered.contains("~74.2 KB"), "got: {rendered}");
+        assert!(rendered.contains("photos/small.png"), "got: {rendered}");
+        assert!(rendered.contains("400x400"), "got: {rendered}");
+        assert!(rendered.contains("ImageTooSmall"), "got: {rendered}");
         assert!(
             rendered.contains("Summary: 1 valid, 1 invalid (2 scanned)"),
             "got: {rendered}"
         );
+    }
+
+    /// A path longer than the rest does not push anybody else's columns around.
+    ///
+    /// The reported defect, exactly: the width was a constant, one file name was
+    /// wider than it, and from that row down the listing had no columns at all.
+    /// Both mark sets are checked because they are four characters wide and one,
+    /// so every offset in the table depends on which is in use — and the console
+    /// that showed the defect was the one running the wider pair.
+    #[test]
+    fn one_long_path_does_not_break_the_alignment() {
+        let entries = vec![
+            Entry {
+                path: PathBuf::from("./Alberto_Forest.png"),
+                verdict: Verdict::Usable {
+                    dimensions: (3264, 2448),
+                    capacity_bytes: 17_000,
+                },
+            },
+            Entry {
+                path: PathBuf::from("./Alcala_Central_Electrica_de_la_Sierra.png"),
+                verdict: Verdict::Usable {
+                    dimensions: (2592, 4608),
+                    capacity_bytes: 25_400,
+                },
+            },
+            Entry {
+                path: PathBuf::from("./Disney.png"),
+                verdict: Verdict::Usable {
+                    dimensions: (6526, 3679),
+                    capacity_bytes: 51_000,
+                },
+            },
+        ];
+
+        let values = [
+            ("./Alberto_Forest.png", "3264x2448", "~16.6 KB"),
+            (
+                "./Alcala_Central_Electrica_de_la_Sierra.png",
+                "2592x4608",
+                "~24.8 KB",
+            ),
+            ("./Disney.png", "6526x3679", "~49.8 KB"),
+        ];
+
+        for marks in MARK_SETS {
+            let rendered = render_listing_with(marks, ".", &entries, false);
+            let table = table_of(&rendered);
+
+            assert_eq!(table.len(), 4, "a heading and three rows: {rendered}");
+
+            let columns = (
+                offset_of(table[0], PATH_HEADING),
+                offset_of(table[0], SIZE_HEADING),
+                offset_of(table[0], CAPACITY_HEADING),
+            );
+
+            for (line, (path, size, capacity)) in table[1..].iter().zip(values) {
+                assert_eq!(
+                    (
+                        offset_of(line, path),
+                        offset_of(line, size),
+                        offset_of(line, capacity)
+                    ),
+                    columns,
+                    "{marks:?} left the table ragged: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// Both verdicts print the same columns, dimensions included.
+    ///
+    /// Before this the two had different shapes — a usable row ended in a
+    /// capacity, a rejected one put the reason where the dimensions went — so
+    /// `--all` printed two tables shuffled together and neither of them lined
+    /// up. A file that never decoded far enough to have dimensions leaves that
+    /// column blank rather than closing it.
+    #[test]
+    fn a_rejected_row_has_the_same_columns_as_a_usable_one() {
+        let entries = vec![
+            Entry {
+                path: PathBuf::from("good.png"),
+                verdict: Verdict::Usable {
+                    dimensions: (3000, 3000),
+                    capacity_bytes: 22_000,
+                },
+            },
+            Entry {
+                path: PathBuf::from("small.png"),
+                verdict: Verdict::Unusable {
+                    reason: "ImageTooSmall",
+                    dimensions: Some((400, 400)),
+                },
+            },
+            Entry {
+                path: PathBuf::from("not-an-image.png"),
+                verdict: Verdict::Unusable {
+                    reason: "NotPng",
+                    dimensions: None,
+                },
+            },
+        ];
+
+        for marks in MARK_SETS {
+            let rendered = render_listing_with(marks, ".", &entries, true);
+            let table = table_of(&rendered);
+
+            assert_eq!(table.len(), 4, "a heading and three rows: {rendered}");
+
+            let path_column = offset_of(table[0], PATH_HEADING);
+            let size_column = offset_of(table[0], SIZE_HEADING);
+            let detail_column = offset_of(table[0], CAPACITY_AND_REASON_HEADING);
+
+            assert_eq!(
+                (
+                    offset_of(table[1], "good.png"),
+                    offset_of(table[1], "3000x3000"),
+                    offset_of(table[1], "~21.5 KB")
+                ),
+                (path_column, size_column, detail_column),
+                "{marks:?}: {rendered}"
+            );
+            assert_eq!(
+                (
+                    offset_of(table[2], "small.png"),
+                    offset_of(table[2], "400x400"),
+                    offset_of(table[2], "ImageTooSmall")
+                ),
+                (path_column, size_column, detail_column),
+                "{marks:?}: {rendered}"
+            );
+
+            // The row with no dimensions is the one that used to close the gap
+            // and pull its last column left. It leaves the column empty and the
+            // reason stays where every other reason is.
+            assert_eq!(
+                (
+                    offset_of(table[3], "not-an-image.png"),
+                    offset_of(table[3], "NotPng")
+                ),
+                (path_column, detail_column),
+                "{marks:?}: {rendered}"
+            );
+        }
+    }
+
+    /// `--all` puts what can be used first and what cannot after it.
+    ///
+    /// Alphabetically interleaved, the actionable half of a real scan is spread
+    /// through the whole listing; that is what it cost in use. Within each group
+    /// the order the entries arrived in is kept.
+    #[test]
+    fn the_full_listing_groups_the_usable_containers_first() {
+        let entries = vec![
+            Entry {
+                path: PathBuf::from("a-rejected.png"),
+                verdict: Verdict::Unusable {
+                    reason: "JpegDetected",
+                    dimensions: None,
+                },
+            },
+            Entry {
+                path: PathBuf::from("b-usable.png"),
+                verdict: Verdict::Usable {
+                    dimensions: (2000, 2000),
+                    capacity_bytes: 8_300,
+                },
+            },
+            Entry {
+                path: PathBuf::from("c-rejected.png"),
+                verdict: Verdict::Unusable {
+                    reason: "NotPng",
+                    dimensions: None,
+                },
+            },
+            Entry {
+                path: PathBuf::from("d-usable.png"),
+                verdict: Verdict::Usable {
+                    dimensions: (2400, 2400),
+                    capacity_bytes: 12_000,
+                },
+            },
+        ];
+
+        let rendered = render_listing(".", &entries, true);
+        let order: Vec<&str> = table_of(&rendered)
+            .into_iter()
+            .skip(1)
+            .filter_map(|line| line.split_whitespace().nth(1))
+            .collect();
+
+        assert_eq!(
+            order,
+            ["b-usable.png", "d-usable.png", "a-rejected.png", "c-rejected.png"],
+            "got: {rendered}"
+        );
+    }
+
+    /// The headings name the columns, and the last one says what it holds.
+    ///
+    /// The note under the listing explains an asterisk, and until there were
+    /// headings no character on the page carried one. It is anchored to the
+    /// heading of the column it describes, and that heading only claims a
+    /// capacity when a capacity is listed.
+    #[test]
+    fn the_headings_anchor_the_note_about_the_capacity() {
+        let usable = || Entry {
+            path: PathBuf::from("good.png"),
+            verdict: Verdict::Usable {
+                dimensions: (2000, 2000),
+                capacity_bytes: 8_300,
+            },
+        };
+        let rejected = || Entry {
+            path: PathBuf::from("bad.png"),
+            verdict: Verdict::Unusable {
+                reason: "NotPng",
+                dimensions: None,
+            },
+        };
+
+        let note = "* Estimated payload capacity";
+
+        let only_usable = render_listing(".", &[usable()], false);
+        assert!(only_usable.contains(CAPACITY_HEADING), "got: {only_usable}");
+        assert!(only_usable.contains(note), "got: {only_usable}");
+
+        let both = render_listing(".", &[usable(), rejected()], true);
+        assert!(both.contains(CAPACITY_AND_REASON_HEADING), "got: {both}");
+        assert!(both.contains(note), "got: {both}");
+
+        // Nothing usable: no capacity is listed, so neither the asterisk nor the
+        // note it belongs to appears at all.
+        let only_rejected = render_listing(".", &[rejected()], true);
+        assert!(only_rejected.contains(REASON_HEADING), "got: {only_rejected}");
+        assert!(!only_rejected.contains('*'), "got: {only_rejected}");
+        assert!(only_rejected.contains(PATH_HEADING), "got: {only_rejected}");
+    }
+
+    /// A scan with nothing to list prints no headings.
+    ///
+    /// Headings over an empty table would be a promise of rows that are not
+    /// coming.
+    #[test]
+    fn an_empty_table_has_no_headings() {
+        let rendered = render_listing(".", &[], true);
+
+        assert!(!rendered.contains(PATH_HEADING), "got: {rendered}");
+        assert!(rendered.contains("0 scanned"), "got: {rendered}");
+    }
+
+    /// No line of the listing ends in whitespace.
+    ///
+    /// Padded columns are the easy way to leave a trail of trailing spaces, and
+    /// they turn a listing into something no diff and no copy-paste survives
+    /// cleanly.
+    #[test]
+    fn no_line_is_padded_past_its_last_column() {
+        let entries = vec![
+            Entry {
+                path: PathBuf::from("a-very-long-name-for-a-photograph.png"),
+                verdict: Verdict::Usable {
+                    dimensions: (3000, 3000),
+                    capacity_bytes: 22_000,
+                },
+            },
+            Entry {
+                path: PathBuf::from("b.png"),
+                verdict: Verdict::Unusable {
+                    reason: "NotPng",
+                    dimensions: None,
+                },
+            },
+        ];
+
+        for marks in MARK_SETS {
+            let rendered = render_listing_with(marks, ".", &entries, true);
+
+            for line in rendered.lines() {
+                assert_eq!(
+                    line.trim_end(),
+                    line,
+                    "{marks:?} padded past the last column: {line:?}"
+                );
+            }
+        }
     }
 
     /// A scan that accepted nothing names the way out; one that accepted

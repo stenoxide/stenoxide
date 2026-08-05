@@ -119,13 +119,20 @@ script can parse instead of a listing.
 ```text
 Scanning ./photos ...
 
-  ✓ photos/landscape.png         3840x2160   ~74.2 KB payload
-  ✗ photos/portrait.jpg          UnsupportedFormat
-  ✗ photos/logo.png              ImageTooSmall 400x400
+    PATH                   SIZE      PAYLOAD* / REASON
+  ✓ photos/landscape.png   3840x2160 ~74.2 KB
+  ✗ photos/logo.png        400x400   ImageTooSmall
+  ✗ photos/portrait.jpg              UnsupportedFormat
 
   * Estimated payload capacity after encryption overhead
   Summary: 1 valid, 2 invalid (3 scanned)
 ```
+
+The columns are as wide as the longest value under them, so a long file name
+pushes the whole table right rather than losing its own alignment — a path is
+never shortened, because a shortened path is not one you can act on. With
+`--all` the usable containers come first and the rejections after them, each
+group in alphabetical order.
 
 The capacity shown is what the container admits after encryption. The message is
 compressed first, so ordinary text usually fits at two or three times that

@@ -79,6 +79,14 @@ silicon) are attached to every [GitHub
 release](https://github.com/stenoxide/stenoxide/releases) if you would rather
 not compile.
 
+Tab completion and the manual page are written on demand, as the artifact and
+nothing else, so both can be sourced or redirected directly:
+
+```sh
+source <(stenoxide completions bash)   # also zsh, fish, powershell, elvish
+stenoxide man > stenoxide.1
+```
+
 ### Library
 
 ```sh
@@ -91,8 +99,14 @@ cargo add stenoxide-core
 Neither the password nor the message is ever passed as an argument, so nothing
 sensitive reaches the shell history or the process table. Both validate the
 container before asking for anything, so an unusable image is refused before you
-type a passphrase — and so is a payload path that cannot be read, or an output
-file that already exists.
+type a passphrase — and so is a payload path that cannot be read, or a
+destination that cannot receive the file.
+
+The paths every subcommand takes have short forms, and a letter means the same
+thing wherever it appears: `-i` is the image being read, `-o` is where the result
+goes, `-p` is the file to hide, `-f` is `--force`. That is why `generate --input`
+abbreviates to `-p` and not to `-i` — it names the file being hidden, not an
+image. `-h` is always `--help`, so `--width` and `--height` have no short forms.
 
 ### Scan
 
@@ -111,17 +125,32 @@ script can parse instead of a listing.
 ```text
 Scanning ./photos ...
 
-  ✓ photos/landscape.png         3840x2160   ~74.2 KB payload
-  ✗ photos/portrait.jpg          UnsupportedFormat
-  ✗ photos/logo.png              ImageTooSmall 400x400
+    PATH                   SIZE      PAYLOAD* / REASON
+  ✓ photos/landscape.png   3840x2160 ~74.2 KB
+  ✗ photos/logo.png        400x400   ImageTooSmall
+  ✗ photos/portrait.jpg              UnsupportedFormat
 
   * Estimated payload capacity after encryption overhead
   Summary: 1 valid, 2 invalid (3 scanned)
+
+  Hide a message in one of them:
+  stenoxide embed --input <file above> --output stego.png
 ```
+
+The columns are as wide as the longest value under them, so a long file name
+pushes the whole table right rather than losing its own alignment — a path is
+never shortened, because a shortened path is not one you can act on. With
+`--all` the usable containers come first and the rejections after them, each
+group in alphabetical order.
 
 The capacity shown is what the container admits after encryption. The message is
 compressed first, so ordinary text usually fits at two or three times that
 figure.
+
+The last two lines name the next step with a placeholder rather than with one of
+the files listed: which of your photographs to send is not a decision this tool
+makes for you. When nothing at all can be used they are replaced by the one
+mention of `stenoxide generate`.
 
 A recursive scan of a large folder shows a progress bar with a time estimate
 while it works. The estimate is measured in megapixels rather than in files,
@@ -146,11 +175,19 @@ $ stenoxide embed --input photo.png --output stego.png
 Password:
 Message to hide. It may span as many lines as you need.
 Finish with a line containing a single dot:  .
+A line you have sent cannot be edited; to revise one first, put the message in
+a file and pass it with -p.
 Meet me at six.
 Bring the other half.
 .
 Read 38 bytes.
 ```
+
+There is no line editor here, and the arrow keys will not bring back the line
+above — they reach the console's own editor, which recalls your shell history.
+That is deliberate: every line editor worth having keeps a history, and a
+history is somewhere the message could end up written down. Write it in a file
+and pass it with `-p` when you want to revise it first.
 
 Typing it is the more private of the two: a message given to `echo` is a
 command line like any other and stays in the shell's history, while nothing
@@ -177,6 +214,14 @@ size of the *compressed* payload rather than the size of your file. Ask
 When `--payload` is given, standard input is not read at all, and a path that
 does not exist, names a folder, or is empty is refused before the passphrase is
 asked for.
+
+`--output` takes the whole path of the file to write, name included. There is no
+default: a name derived from the container would record the link between cover
+and stego on your disk, which is the one relationship this hides. It is judged
+before the passphrase too — a folder, a folder that does not exist, and a file
+that is already there are all refused while it still costs you nothing, and
+`--force` is what authorises replacing that file. The same applies to
+`generate`.
 
 ### Generate
 

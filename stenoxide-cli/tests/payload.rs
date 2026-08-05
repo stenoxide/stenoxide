@@ -1,10 +1,10 @@
-//! Tests of `--payload`, `--payload-out` and `--force`, driven through the
-//! binary itself.
+//! Tests of the path flags — `--payload`, `--output`, `--payload-out` and
+//! `--force` — driven through the binary itself.
 //!
 //! # Why these run the process rather than call a function
 //!
 //! What is being asserted is an *ordering*: that a payload path which cannot be
-//! read, and a destination that already exists, are both refused before
+//! read, and a destination that cannot receive a file, are both refused before
 //! anything asks the user for a passphrase. Inside the process that ordering is
 //! two statements in sequence and nothing observes it. From outside it is the
 //! difference between a command that exits and one that sits waiting on a
@@ -184,6 +184,111 @@ fn a_directory_as_the_payload_is_refused_with_advice() {
         "the password was asked for before the payload path was judged: {said}"
     );
     assert!(!stego.exists());
+}
+
+/// A folder given to `embed --output` is refused before the password is read.
+///
+/// The reported failure, from the outside where it is visible: the command was
+/// accepted, the passphrase and the message were typed, most of a minute went
+/// into Argon2id and HILL, and the write at the end failed with a raw operating
+/// system error. Nothing about the destination changed in that minute — it was a
+/// folder before the command started.
+#[test]
+fn a_folder_as_the_output_is_refused_before_the_password_is_read() {
+    let directory = TempDir::new().expect("temporary directory");
+    let cover = place_cover(directory.path(), "cover.png");
+    let folder = directory.path().join("out");
+    std::fs::create_dir(&folder).expect("the folder should be creatable");
+
+    let output = stenoxide(&["embed", "--input", &arg(&cover), "--output", &arg(&folder)]);
+
+    assert!(!output.status.success(), "the command should have failed");
+
+    let said = everything_said(&output);
+    assert!(said.contains("is a directory"), "got: {said}");
+    assert!(
+        said.contains("--output"),
+        "the refusal must say what the flag takes, got: {said}"
+    );
+    assert!(
+        !said.contains("Password"),
+        "the password was asked for before the destination was judged: {said}"
+    );
+}
+
+/// An existing stego image is not silently replaced, and `--force` is the way.
+///
+/// Without the check the write truncates it and reports success: the previous
+/// stego image is gone, and with it the message it carried. That is data loss,
+/// not an inconvenience, which is why the refusal comes before the passphrase
+/// rather than as a warning after it.
+#[test]
+fn an_existing_output_is_refused_before_the_password_is_read() {
+    let directory = TempDir::new().expect("temporary directory");
+    let cover = place_cover(directory.path(), "cover.png");
+    let stego = directory.path().join("stego.png");
+    std::fs::write(&stego, b"an earlier stego image").expect("fixture write");
+
+    let output = stenoxide(&["embed", "--input", &arg(&cover), "--output", &arg(&stego)]);
+
+    assert!(!output.status.success(), "the command should have failed");
+
+    let said = everything_said(&output);
+    assert!(said.contains("already exists"), "got: {said}");
+    assert!(said.contains("--force"), "got: {said}");
+    assert!(!said.contains("Password"), "got: {said}");
+
+    let kept = std::fs::read(&stego).expect("the file must still be there");
+    assert_eq!(
+        kept, b"an earlier stego image",
+        "the existing image must be untouched"
+    );
+}
+
+/// A folder that does not exist is named, before the password is read.
+///
+/// The operating system's own answer to this is "the system cannot find the path
+/// specified", which does not say *which* path, and arrives after the work.
+#[test]
+fn a_missing_output_folder_is_refused_before_the_password_is_read() {
+    let directory = TempDir::new().expect("temporary directory");
+    let cover = place_cover(directory.path(), "cover.png");
+    let destination = directory.path().join("nowhere").join("stego.png");
+
+    let output = stenoxide(&[
+        "embed",
+        "--input",
+        &arg(&cover),
+        "--output",
+        &arg(&destination),
+    ]);
+
+    assert!(!output.status.success(), "the command should have failed");
+
+    let said = everything_said(&output);
+    assert!(said.contains("nowhere"), "got: {said}");
+    assert!(said.contains("does not exist"), "got: {said}");
+    assert!(!said.contains("Password"), "got: {said}");
+}
+
+/// `generate` judges its destination on the same terms, and just as early.
+///
+/// It has no container to validate, so the destination is the only thing
+/// standing between a mistyped path and the slowest operation this program
+/// performs.
+#[test]
+fn generate_refuses_a_folder_as_its_output() {
+    let directory = TempDir::new().expect("temporary directory");
+    let folder = directory.path().join("out");
+    std::fs::create_dir(&folder).expect("the folder should be creatable");
+
+    let output = stenoxide(&["generate", "--output", &arg(&folder)]);
+
+    assert!(!output.status.success(), "the command should have failed");
+
+    let said = everything_said(&output);
+    assert!(said.contains("is a directory"), "got: {said}");
+    assert!(!said.contains("Password"), "got: {said}");
 }
 
 /// An existing destination is refused by name, before the password is read.

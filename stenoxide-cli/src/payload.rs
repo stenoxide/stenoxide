@@ -61,7 +61,11 @@ const MAX_PAYLOAD_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const TEXT_EXTENSION: &str = "txt";
 
 /// The extension used when no signature matches and the bytes are not text.
-const BINARY_EXTENSION: &str = "bin";
+///
+/// Also the answer to "was the type recognised at all?", which is why it is
+/// visible outside this module: a caller naming the type of a payload has
+/// nothing to name when [`detect_extension`] returns this one.
+pub(crate) const BINARY_EXTENSION: &str = "bin";
 
 /// Stem of the file written when the requested path is a directory.
 const DEFAULT_STEM: &str = "payload";

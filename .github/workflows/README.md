@@ -5,6 +5,15 @@ Two workflows govern everything that leaves this repository. Work lands on
 accumulated enough to release. `stable` is the published line, and nothing
 reaches crates.io without passing through a pull request into it.
 
+The two merges are not the same merge, and the rulesets allow one method each.
+A pull request into `main` is **squashed**: a branch is one change, and the
+squash is what records the commits it replaced. The promotion into `stable` is
+a **merge commit**: those squashes are already the changelog, and squashing them
+a second time would flatten a release into a single commit and put every entry
+behind one hash. The merge commit itself contributes nothing — its subject is
+not a Conventional Commit, so `changes.sh` passes over it and reads the commits
+it brought across.
+
 ## Pull request title (`pr-title.yml`)
 
 Runs on every pull request targeting `main` or `stable`, and again whenever the
@@ -267,7 +276,7 @@ neither of which can be taken back.
 
 | Rule | Why |
 |------|-----|
-| Pull request required, squash only | Nothing reaches the published line without a merge that the release job can read. |
+| Pull request required, merge commit only | Nothing reaches the published line without a merge the release job can read. A merge commit is what carries the squashes on `main` across intact, one changelog line and one link each; a squash here would collapse the whole release into one commit. |
 | **Test and validate** must pass | Clippy, the tests, the coverage floor, `cargo audit` and the packaging dry run — the full job, which only a `stable` target gets. |
 | **Pull request title** must pass | The title is the fallback subject a squash lands with. |
 | Branch must be up to date | The checks ran against what will actually be on `stable`. |
@@ -299,21 +308,28 @@ enforces:
 
 | Rule | Why |
 |------|-----|
+| Pull request required, squash only | A branch lands as one commit carrying the list of the commits it replaced — the unit the release later reads. |
 | **Test and validate** must pass | Clippy. The tests, the coverage floor and the release steps are all skipped for a `main` target, so this gate says the branch lints — the proof arrives at the promotion to `stable`. |
 | **Pull request title** must pass | The title is the fallback subject a squash lands with, and what the next promotion to `stable` reads. |
 | No force push, no deletion | The history a merged pull request was checked against stays where it is. |
 
-No pull request is required, and the branch is not required to be up to date.
-Both are deliberate: a direct push is still allowed (see below), and forcing a
-rebase whenever something else lands first buys nothing on a branch whose
-content is verified again on the way to `stable`.
+The branch is not required to be up to date, deliberately: forcing a rebase
+whenever something else lands first buys nothing on a branch whose content is
+verified again on the way to `stable`.
+
+Restricting the merge method is why the pull request rule is here at all —
+`allowed_merge_methods` lives inside that rule and nowhere else, so squash-only
+and pull-request-required are one decision, not two. The repository-wide setting
+under *Settings → General* cannot do it: it applies to every branch, and the two
+branches here need different methods.
 
 #### Why an owner can still push straight to `main`
 
-The two are not separable as cleanly as they look. A required status check is
-evaluated against whatever updates the ref, so the rule that blocks a red merge
-blocks a direct push too — a freshly written commit carries no checks at all,
-and the push is refused outright:
+The two are not separable as cleanly as they look. Both rules that gate a merge
+gate a push as well: the pull request rule refuses one on its face, and a
+required status check is evaluated against whatever updates the ref, so even
+without it a freshly written commit — which carries no checks at all — is
+refused outright:
 
 ```
 remote: - 2 of 2 required status checks are expected.

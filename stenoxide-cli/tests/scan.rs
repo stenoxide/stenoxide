@@ -161,7 +161,9 @@ fn a_mixed_directory_lists_the_usable_images_and_hides_the_rest() {
     let full = stdout_of(&stenoxide(&["scan", &path, "--all"]));
     assert!(full.contains("usable.png"), "got: {full}");
     assert!(full.contains("small.png"), "got: {full}");
-    assert!(full.contains("ImageTooSmall 400x400"), "got: {full}");
+    // The dimensions and the reason are both reported, in their own columns.
+    assert!(full.contains("400x400"), "got: {full}");
+    assert!(full.contains("ImageTooSmall"), "got: {full}");
     assert!(full.contains("photo.jpg"), "got: {full}");
     assert!(full.contains("UnsupportedFormat"), "got: {full}");
     assert!(
@@ -471,6 +473,37 @@ fn a_scan_that_accepts_nothing_points_at_the_generative_mode() {
     place_cover(directory.path(), "usable.png");
     let mixed = stdout_of(&stenoxide(&["scan", &path]));
     assert!(!mixed.contains("stenoxide generate"), "got: {mixed}");
+}
+
+/// A scan that accepts something names the command that uses it.
+///
+/// The counterpart of the test above, and the case that had nothing at all: the
+/// pointer onwards only existed for the user whose photographs were all refused.
+/// Driven through the process for the same two reasons — the placement is the
+/// end of the listing, and the JSON form must not carry a word of it.
+#[test]
+fn a_scan_that_accepts_something_names_the_next_command() {
+    let directory = TempDir::new().expect("temporary directory");
+    place_cover(directory.path(), "usable.png");
+
+    let path = directory.path().to_string_lossy().into_owned();
+    let listing = stdout_of(&stenoxide(&["scan", &path]));
+
+    assert!(listing.contains("stenoxide embed"), "got: {listing}");
+    // A placeholder, not the file that was just listed: choosing one of the
+    // user's photographs for them is the decision this tool does not make.
+    assert!(
+        !listing.contains("--input usable.png"),
+        "the line must not recommend a listed file: {listing}"
+    );
+    // And it is the last thing said, after the summary.
+    let summary = listing.find("Summary:").unwrap_or(usize::MAX);
+    let pointer = listing.find("stenoxide embed").unwrap_or(0);
+    assert!(pointer > summary, "got: {listing}");
+
+    // A document is a document.
+    let document = stdout_of(&stenoxide(&["scan", &path, "--json"]));
+    assert!(!document.contains("stenoxide embed"), "got: {document}");
 }
 
 /// The set of top-level keys of a JSON object.

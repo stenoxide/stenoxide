@@ -126,7 +126,15 @@ Scanning ./photos ...
 
   * Estimated payload capacity after encryption overhead
   Summary: 1 valid, 2 invalid (3 scanned)
+
+  Hide a message in one of them:
+  stenoxide embed --input <file above> --output stego.png
 ```
+
+The last two lines name the next step with a placeholder rather than with one of
+the files listed: which of your photographs to send is not a decision this tool
+makes for you. When nothing at all can be used they are replaced by the one
+mention of `stenoxide generate`.
 
 The columns are as wide as the longest value under them, so a long file name
 pushes the whole table right rather than losing its own alignment — a path is

@@ -475,6 +475,37 @@ fn a_scan_that_accepts_nothing_points_at_the_generative_mode() {
     assert!(!mixed.contains("stenoxide generate"), "got: {mixed}");
 }
 
+/// A scan that accepts something names the command that uses it.
+///
+/// The counterpart of the test above, and the case that had nothing at all: the
+/// pointer onwards only existed for the user whose photographs were all refused.
+/// Driven through the process for the same two reasons — the placement is the
+/// end of the listing, and the JSON form must not carry a word of it.
+#[test]
+fn a_scan_that_accepts_something_names_the_next_command() {
+    let directory = TempDir::new().expect("temporary directory");
+    place_cover(directory.path(), "usable.png");
+
+    let path = directory.path().to_string_lossy().into_owned();
+    let listing = stdout_of(&stenoxide(&["scan", &path]));
+
+    assert!(listing.contains("stenoxide embed"), "got: {listing}");
+    // A placeholder, not the file that was just listed: choosing one of the
+    // user's photographs for them is the decision this tool does not make.
+    assert!(
+        !listing.contains("--input usable.png"),
+        "the line must not recommend a listed file: {listing}"
+    );
+    // And it is the last thing said, after the summary.
+    let summary = listing.find("Summary:").unwrap_or(usize::MAX);
+    let pointer = listing.find("stenoxide embed").unwrap_or(0);
+    assert!(pointer > summary, "got: {listing}");
+
+    // A document is a document.
+    let document = stdout_of(&stenoxide(&["scan", &path, "--json"]));
+    assert!(!document.contains("stenoxide embed"), "got: {document}");
+}
+
 /// The set of top-level keys of a JSON object.
 ///
 /// A parser sufficient for the question being asked: the document this crate

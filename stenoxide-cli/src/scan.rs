@@ -57,6 +57,23 @@ const CAPACITY_AND_REASON_HEADING: &str = "PAYLOAD* / REASON";
 /// No asterisk, because no row carries a capacity and the note is not printed.
 const REASON_HEADING: &str = "REASON";
 
+/// What a scan says after it has listed at least one usable container.
+///
+/// `scan` answered its question and then stopped. Someone who has just been told
+/// which of their photographs will do still has to know what the next verb is
+/// called, and the listing gave no sign of it — the only pointer onwards was the
+/// one printed when *nothing* could be used, which is the case where there is no
+/// next step to take.
+///
+/// The placeholder is the whole design of the line. Naming one of the files just
+/// listed would be recommending it, and nothing measured here says which of
+/// somebody's photographs is the right one to send; the names are on the page
+/// directly above. It is the same restraint that keeps `generate` a subcommand
+/// rather than an offer — no decision is pushed that the user has not taken.
+const NEXT_STEP_HINT: &str = "\n\
+  Hide a message in one of them:\n\
+  stenoxide embed --input <file above> --output stego.png\n";
+
 /// What a scan that accepted nothing says at the end of its summary.
 ///
 /// The one place `stenoxide generate` is offered, and it is offered rather than
@@ -668,7 +685,13 @@ fn render_listing_with(marks: Marks, argument: &str, entries: &[Entry], all: boo
         let _ = writeln!(report, "  Run with --all to see why an image was rejected.");
     }
 
-    if usable == 0 && scanned > 0 {
+    // One pointer or the other, never both and never neither when something was
+    // scanned. Written as one branch rather than two conditions so that the
+    // exclusivity is a property of the code instead of a coincidence between two
+    // predicates somebody could edit apart.
+    if usable > 0 {
+        let _ = write!(report, "{NEXT_STEP_HINT}");
+    } else if scanned > 0 {
         let _ = write!(report, "{NOTHING_USABLE_HINT}");
     }
 
@@ -1295,6 +1318,71 @@ mod tests {
 
         // Nothing was scanned at all, so there is nothing to conclude from.
         assert!(!render_listing(".", &[], true).contains("stenoxide generate"));
+    }
+
+    /// A scan that found a container names the command that uses one.
+    ///
+    /// And names it with a placeholder rather than with one of the files it just
+    /// listed: choosing one would be recommending it, and nothing measured here
+    /// says which of somebody's photographs is the one to send.
+    #[test]
+    fn a_scan_that_found_something_names_the_next_command() {
+        let entries = vec![Entry {
+            path: PathBuf::from("holiday.png"),
+            verdict: Verdict::Usable {
+                dimensions: (2000, 2000),
+                capacity_bytes: 8_300,
+            },
+        }];
+
+        let listing = render_listing(".", &entries, false);
+
+        assert!(listing.contains("stenoxide embed"), "got: {listing}");
+        assert!(
+            !listing.contains("--input holiday.png"),
+            "the line must not recommend one of the listed files: {listing}"
+        );
+    }
+
+    /// The two pointers are mutually exclusive, and neither is invented.
+    ///
+    /// They answer opposite situations — one says what to do with a container,
+    /// the other says there is none — so a listing carrying both would be
+    /// contradicting itself, and a scan of nothing at all has neither to offer.
+    #[test]
+    fn the_two_pointers_never_appear_together() {
+        let usable = || Entry {
+            path: PathBuf::from("good.png"),
+            verdict: Verdict::Usable {
+                dimensions: (2000, 2000),
+                capacity_bytes: 8_300,
+            },
+        };
+        let rejected = || Entry {
+            path: PathBuf::from("bad.png"),
+            verdict: Verdict::Unusable {
+                reason: "JpegDetected",
+                dimensions: None,
+            },
+        };
+
+        let found = render_listing(".", &[usable(), rejected()], true);
+        assert!(found.contains("stenoxide embed"), "got: {found}");
+        assert!(!found.contains("stenoxide generate"), "got: {found}");
+
+        let empty_handed = render_listing(".", &[rejected()], true);
+        assert!(
+            empty_handed.contains("stenoxide generate"),
+            "got: {empty_handed}"
+        );
+        assert!(
+            !empty_handed.contains("stenoxide embed"),
+            "got: {empty_handed}"
+        );
+
+        let nothing = render_listing(".", &[], true);
+        assert!(!nothing.contains("stenoxide embed"), "got: {nothing}");
+        assert!(!nothing.contains("stenoxide generate"), "got: {nothing}");
     }
 
     /// Without `--all` the listing points at the flag that would explain a

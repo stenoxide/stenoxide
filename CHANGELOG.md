@@ -1,54 +1,5 @@
 # Changelog
 
-## Why the numbers jump
-
-Versions here are calculated, not chosen. The release pipeline replays every
-Conventional Commit made since the previous tag and applies one bump per change,
-in order, so a version records how much happened rather than only the most
-significant thing that happened (see `.github/scripts/next-version.sh`). Steps
-are therefore larger than a one-bump-per-release scheme would give.
-
-Two of those steps are larger than the work behind them justifies, and the
-reason is written down here rather than left to be inferred from the sections
-below.
-
-**1.7.2 → 3.7.2 — the same breaking change counted three times.** `v1.7.2` was
-tagged on a squash commit, so the commits that squash replaced were not
-ancestors of the tag. When `main` and `stable` were brought back into line they
-arrived as new commits, and `chore(deps)!: raise the minimum supported Rust
-version to 1.85` — released in 1.7.2 — was among them. The calculation met it
-twice more, and a breaking change is a major bump each time it is met:
-1 → 2 → 3. Nothing broke three times. The MSRV was raised once, 1.7.2 is the
-release that did it, and it is still 1.85. The repeated entries in the 3.7.2
-section have the same origin, which is why so many of them carry the hash of a
-single merge commit (`66ee2bd`).
-
-**3.7.2 → 3.7.4 — a release cut over an accidental revert.** #22 reverted the
-CI/CD work by mistake and `v3.7.2` was tagged directly on top of it, so the
-published 3.7.2 was missing roughly 2,900 lines — `generate`, the `scan`
-subcommand and their tests — while its changelog announced them all. #23 put the
-work back, 3.7.3 was written into `Cargo.toml` by hand to abandon the bad
-number, and the pipeline added its own patch on top of that. 3.7.4 is the
-result: the first release whose tree actually contains what the 3.7.2 section
-describes. Generated, its section held that hand-written bump and nothing else —
-the reverts and merges around it were not Conventional Commits, and what the
-calculation ignores the changelog never sees — so the entries under it have been
-written out by hand instead.
-
-**If you are on 3.7.2, upgrade.** It is the only version of the two that is
-incomplete — and it is the only tag with no release behind it, since the build
-that would have published it never finished.
-
-From 3.7.4 onwards the numbers come from a history with nothing counted twice.
-They still move in large steps — 3.7.4 to 3.16.4 is nine features, with four
-smaller changes landing after the last of them — but every step in them is a
-change that was made once.
-
-## [Unreleased]
-
-### Features
-- **crypto**: establish the payload key by ML-KEM-1024 encapsulation behind the `pqc` feature — a `keygen` subcommand, `--recipient` on `generate`, and `--identity` on `extract`, with the key files kept as pasteable single lines. The mode is **experimental**: its format is not yet settled and is compiled only with `--features pqc`.
-
 ## [3.16.4] - 2026-08-05
 
 ### Features

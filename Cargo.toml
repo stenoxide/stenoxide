@@ -10,7 +10,7 @@ members = ["stenoxide-core", "stenoxide-cli"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "3.7.4"
+version = "3.16.4"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"

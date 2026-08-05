@@ -1,0 +1,16 @@
+# Build output of the fuzzing crate, which is its own workspace and therefore
+# has its own target directory.
+target/
+
+# The corpus. Two reasons it is not versioned: the container seeds are
+# multi-megabyte PNGs regenerated in seconds by `cargo run --bin seed_corpus`,
+# and everything the fuzzer adds to a corpus during a campaign is a machine's
+# scratch work rather than a fact about the program. What a campaign *finds* is
+# not kept here either — it is translated into a regression test in the ordinary
+# suite, which is the only artifact of a campaign worth a commit.
+corpus/
+
+# libFuzzer's own working files: the crashing inputs it writes out, the coverage
+# it accumulates, and the timings.
+artifacts/
+coverage/

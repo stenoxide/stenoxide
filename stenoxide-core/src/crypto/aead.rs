@@ -8,6 +8,7 @@
 //! staying invisible to steganalysis.
 
 use std::fmt;
+use std::io::Read;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::XChaCha20Poly1305;
@@ -29,6 +30,44 @@ pub(crate) const STENOXIDE_AAD: &[u8] = b"STENOXIDE-v1";
 /// small and compressed exactly once, so spending time here is free compared
 /// with the embedding capacity it buys back.
 const ZSTD_LEVEL: i32 = 19;
+
+/// Largest plaintext one authenticated payload is allowed to expand to.
+///
+/// # Why a ceiling exists at all
+///
+/// Zstandard is a compression format, not a container format: a frame says how
+/// much it expands to and the decoder obliges. A few kilobytes of ciphertext
+/// can therefore ask for terabytes of memory, and an unbounded
+/// [`decompress`] would hand that request straight to the allocator.
+///
+/// Authentication runs first, so a stranger never reaches this code — but the
+/// threat is not a stranger. The sender is whoever holds the key, and holding
+/// the key is not the same as being a friend. A correspondent can build a frame
+/// that fits inside a container the receiver accepts and expands to more memory
+/// than the receiver has. With the embedding path the damage is bounded by a
+/// capacity of a few kilobytes; with [`crate::generate`], where the default
+/// container carries 1.45 MB and every sample is free, a valid container can
+/// ask for tens of gigabytes. This constant is what turns that request into an
+/// error instead.
+///
+/// # Where the number comes from
+///
+/// The bound is a property of the system rather than a guess. The largest
+/// payload this crate can *produce* is limited by the container that carries
+/// it: the generative mode fills every sample, so at the `MAX_PIXELS` ceiling
+/// of layer 1 — 128 Mi pixels over three channels, one bit each — the largest
+/// ciphertext that can exist is 48 MiB, the default 2000x2000 container carries
+/// 1.45 MB, and the embedding path carries some 7 KB. Half a gibibyte is
+/// therefore a tenfold expansion of the largest container this system will draw
+/// and roughly three hundredfold of the ordinary one, which is far past any
+/// compression ratio a payload worth hiding reaches.
+///
+/// From the other side it stays well under what a machine can spare: layer 1
+/// already commits to a peak working set of about two gibibytes when it accepts
+/// a maximum-size container, so the ceiling does not raise the memory profile
+/// the program already has. The rounding to a power of two is arbitrary and
+/// admitted as such; the order of magnitude is not.
+const MAX_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Failures of the authenticated encryption primitive.
 #[derive(Debug)]
@@ -215,19 +254,66 @@ pub(crate) fn compress(plaintext: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoErr
         .map_err(|err| CryptoError::CompressionError(err.to_string()))
 }
 
-/// Decompresses an authenticated Zstandard frame.
+/// Decompresses an authenticated Zstandard frame, up to a fixed ceiling.
 ///
 /// The inverse of [`compress`]. Nothing must reach this that the Poly1305 tag
 /// has not already vouched for; both callers arrange that.
 ///
+/// The output is bounded by [`MAX_DECOMPRESSED_BYTES`], and it is bounded while
+/// the frame is being read rather than checked afterwards: the decoder is a
+/// stream and the read stops one byte past the ceiling, so a frame that expands
+/// without limit never gets to allocate without limit. Reading that one extra
+/// byte is what separates a payload that ends exactly at the ceiling, which is
+/// allowed, from one that does not, which is not.
+///
+/// # Why the failure is not its own error variant
+///
+/// A payload over the ceiling is reported as [`CryptoError::DecompressionError`],
+/// the same variant a payload that is not a Zstandard frame at all comes back
+/// as. Only the sentence inside it differs, which means no caller can branch on
+/// "compression bomb" against "damaged payload" without matching on a string.
+///
+/// The oracle argument that forces one single sentence on the extraction
+/// surface does not really apply here — decompression happens after the tag has
+/// verified, so anyone who can observe this failure already holds the key and
+/// has nothing left to learn from it. The variant is shared anyway, because
+/// nothing is bought by splitting it: the two failures call for the same action
+/// from a receiver, and one fewer public variant is one fewer distinction a
+/// future caller can accidentally come to depend on.
+///
 /// # Errors
 ///
 /// Returns [`CryptoError::DecompressionError`] if the input is not a valid
-/// Zstandard stream.
+/// Zstandard stream, or if it expands past [`MAX_DECOMPRESSED_BYTES`].
 pub(crate) fn decompress(compressed: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-    zstd::decode_all(compressed)
-        .map(Zeroizing::new)
-        .map_err(|err| CryptoError::DecompressionError(err.to_string()))
+    decompress_within(compressed, MAX_DECOMPRESSED_BYTES)
+}
+
+/// [`decompress`], against a ceiling given rather than assumed.
+///
+/// The ceiling is a parameter for one reason: a test that proves the bound is
+/// enforced has to build a frame that crosses it, and building one that crosses
+/// half a gibibyte means half a gibibyte of memory in a suite that runs on every
+/// commit. Against a ceiling of a few kilobytes the very same code path is
+/// exercised by a bomb small enough to be free. Production has one ceiling, and
+/// [`decompress`] is the only caller that chooses it.
+fn decompress_within(compressed: &[u8], ceiling: u64) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    let decoder = zstd::stream::read::Decoder::new(compressed)
+        .map_err(|err| CryptoError::DecompressionError(err.to_string()))?;
+
+    let mut plaintext = Zeroizing::new(Vec::new());
+    decoder
+        .take(ceiling + 1)
+        .read_to_end(&mut plaintext)
+        .map_err(|err| CryptoError::DecompressionError(err.to_string()))?;
+
+    if plaintext.len() as u64 > ceiling {
+        return Err(CryptoError::DecompressionError(format!(
+            "the payload expands past the {ceiling}-byte ceiling"
+        )));
+    }
+
+    Ok(plaintext)
 }
 
 /// Compresses `plaintext` with Zstandard and then encrypts the result.
@@ -418,6 +504,135 @@ mod tests {
             matches!(error, CryptoError::DecompressionError(_)),
             "got: {error:?}"
         );
+    }
+
+    /// A Zstandard frame that expands to `plaintext_bytes` of zeros.
+    ///
+    /// Compressed at level 1 rather than at [`ZSTD_LEVEL`]: the level is a
+    /// property of the encoder and not of the frame, a decoder cannot tell which
+    /// one produced what it is reading, and level 19 over a run this long would
+    /// dominate the runtime of the whole suite for no gain.
+    ///
+    /// Written through a streaming encoder in chunks, so building a bomb never
+    /// costs the memory the bomb is meant to demand.
+    fn bomb(plaintext_bytes: u64) -> Vec<u8> {
+        use std::io::Write;
+
+        const CHUNK: usize = 64 * 1024;
+
+        let zeros = [0u8; CHUNK];
+        let mut encoder =
+            zstd::stream::write::Encoder::new(Vec::new(), 1).expect("the encoder must start");
+
+        let mut written = 0u64;
+        while written < plaintext_bytes {
+            let step = CHUNK.min((plaintext_bytes - written) as usize);
+            encoder.write_all(&zeros[..step]).expect("the sink is memory");
+            written += step as u64;
+        }
+
+        encoder.finish().expect("the frame must close")
+    }
+
+    /// A payload that stops exactly at the ceiling is a payload, not a bomb.
+    ///
+    /// The boundary is worth pinning in both directions: an off-by-one here
+    /// would silently refuse the largest legitimate payload the system admits.
+    #[test]
+    fn a_payload_that_ends_at_the_ceiling_is_returned() {
+        const CEILING: u64 = 64 * 1024;
+
+        let frame = bomb(CEILING);
+        let plaintext = decompress_within(&frame, CEILING)
+            .expect("a payload that ends at the ceiling must decompress");
+
+        assert_eq!(plaintext.len() as u64, CEILING);
+    }
+
+    /// One byte past the ceiling is refused, and refused while it is being read.
+    ///
+    /// This is the regression test for the compression bomb: a frame of a few
+    /// dozen bytes that expands far past what it is allowed to. It runs against
+    /// a small ceiling so that the refusal costs nothing to prove; see
+    /// [`decompress_within`] for why the ceiling is a parameter.
+    #[test]
+    fn a_payload_that_expands_past_the_ceiling_is_refused() {
+        const CEILING: u64 = 64 * 1024;
+
+        // A thousandfold expansion, from a frame small enough to fit in any
+        // container this crate produces: about two kilobytes, an expansion of
+        // some thirty thousand to one. A bomb that were not far smaller than
+        // the ceiling it defeats would prove nothing.
+        let frame = bomb(CEILING * 1_000);
+        assert!(
+            (frame.len() as u64) < CEILING / 10,
+            "the bomb must be far smaller than the ceiling: {} bytes",
+            frame.len()
+        );
+
+        let error = decompress_within(&frame, CEILING)
+            .map(|_| ())
+            .expect_err("a frame past the ceiling must be refused");
+
+        match error {
+            CryptoError::DecompressionError(message) => {
+                assert!(message.contains("ceiling"), "got: {message}");
+            }
+            other => panic!("expected a decompression failure, got: {other:?}"),
+        }
+    }
+
+    /// A bomb and a payload that is not a Zstandard frame come back as the same
+    /// error variant.
+    ///
+    /// Deliberate. Only the sentence differs, so nothing downstream can branch
+    /// on which of the two happened; see [`decompress`] for the reasoning.
+    #[test]
+    fn a_bomb_and_a_damaged_payload_are_the_same_kind_of_failure() {
+        const CEILING: u64 = 64 * 1024;
+
+        let from_bomb = decompress_within(&bomb(CEILING * 1_000), CEILING).map(|_| ());
+        let from_garbage = decompress_within(b"not a zstandard frame", CEILING).map(|_| ());
+
+        for outcome in [from_bomb, from_garbage] {
+            assert!(
+                matches!(outcome, Err(CryptoError::DecompressionError(_))),
+                "got: {outcome:?}"
+            );
+        }
+    }
+
+    /// The production ceiling clears the largest payload the system can carry.
+    ///
+    /// The bound is not a number picked in isolation: the generative mode fills
+    /// every sample of a container, so the largest ciphertext that can exist is
+    /// fixed by the pixel ceiling of layer 1. The ceiling has to stay above it
+    /// by a wide margin, or a legitimate payload would be refused for being
+    /// large rather than for being a bomb.
+    #[test]
+    fn the_ceiling_clears_the_largest_container_by_an_order_of_magnitude() {
+        // Three channels of one bit per sample, which is what the generative
+        // container carries.
+        let largest_ciphertext = crate::image_io::validate::MAX_PIXELS * 3 / 8;
+
+        assert!(
+            MAX_DECOMPRESSED_BYTES > largest_ciphertext * 10,
+            "{MAX_DECOMPRESSED_BYTES} against {largest_ciphertext}"
+        );
+    }
+
+    /// The ceiling is invisible to every payload the crate actually produces.
+    #[test]
+    fn an_ordinary_payload_is_untouched_by_the_ceiling() {
+        let cipher = XChaCha20Poly1305Cipher::new();
+        let plaintext = plaintext();
+
+        let ciphertext = compress_and_encrypt(&plaintext, &KEY, &NONCE, &cipher)
+            .expect("compression and encryption must succeed");
+        let recovered = decrypt_and_decompress(&ciphertext, &KEY, &NONCE, &cipher)
+            .expect("an ordinary payload must survive the ceiling");
+
+        assert_eq!(recovered.as_slice(), plaintext.as_slice());
     }
 
     /// Every failure explains itself, and the chain of causes is wired.

@@ -241,18 +241,33 @@ enum Command {
         /// JPEG-compressed.
         #[arg(long, value_name = "PATH")]
         input: PathBuf,
-        /// Where to write the resulting stego image. Always written as PNG.
+        // Why there is no default, and why one will not be added. A name
+        // derived from the container — cover.png becoming cover.stego.png —
+        // writes the link between the two files into the filesystem, which is
+        // the one relationship this program exists not to reveal. A random name
+        // leaks nothing but leaves a file the user did not ask for, in a place
+        // they did not choose and then have to go looking for. What the
+        // requirement costs is one immediate retry against a clap error that
+        // already prints the full usage, which is the cheapest of the three.
+        /// Where to write the resulting stego image: the full path, file name
+        /// included. Always written as PNG. There is no default, because a name
+        /// derived from the container would record the link between the two on
+        /// disk.
         #[arg(long, value_name = "PATH")]
         output: PathBuf,
         /// File to hide. Read from standard input when absent; when given,
         /// standard input is not read at all and any redirection is ignored.
         #[arg(long, value_name = "PATH")]
         payload: Option<PathBuf>,
+        /// Overwrite the output file if it already exists.
+        #[arg(long)]
+        force: bool,
     },
     /// Build a container around a message, for when there is no usable photo.
     #[command(long_about = GENERATE_LONG_ABOUT)]
     Generate {
-        /// Where to write the container. Always written as PNG.
+        /// Where to write the container: the full path, file name included.
+        /// Always written as PNG.
         #[arg(long, value_name = "PATH")]
         output: PathBuf,
         /// File to hide. Read from standard input when absent; when given,
@@ -272,6 +287,9 @@ enum Command {
         #[arg(long, value_name = "PIXELS", default_value_t = DEFAULT_CONTAINER_SIDE,
               value_parser = clap::value_parser!(u32).range(i64::from(MIN_CONTAINER_SIDE)..))]
         height: u32,
+        /// Overwrite the output file if it already exists.
+        #[arg(long)]
+        force: bool,
     },
     /// Recover a hidden message from a stego image and write it to standard
     /// output.
@@ -344,13 +362,15 @@ fn main() -> ExitCode {
             input,
             output,
             payload,
-        } => run_embed(input, output, payload.as_deref()),
+            force,
+        } => run_embed(input, output, payload.as_deref(), *force),
         Command::Generate {
             output,
             input,
             width,
             height,
-        } => run_generate(output, input.as_deref(), *width, *height),
+            force,
+        } => run_generate(output, input.as_deref(), *width, *height, *force),
         Command::Extract {
             input,
             payload_out,
@@ -618,15 +638,26 @@ fn describe_embed_rejection(path: &Path, error: &ValidationError) -> String {
 ///
 /// # Errors
 ///
-/// Returns the message to print when the container is unusable, the payload
-/// file cannot be read, the message does not fit, or the stego image cannot be
-/// written. Most of the text comes from the layer that refused, which already
-/// phrases its failures for a user; see [`describe_embed_failure`] for the one
-/// case that is rewritten.
-fn run_embed(input: &Path, output: &Path, payload: Option<&Path>) -> Result<(), String> {
+/// Returns the message to print when the container is unusable, the destination
+/// cannot receive a file, the payload file cannot be read, the message does not
+/// fit, or the stego image cannot be written. Most of the text comes from the
+/// layer that refused, which already phrases its failures for a user; see
+/// [`describe_embed_failure`] for the one case that is rewritten.
+fn run_embed(
+    input: &Path,
+    output: &Path,
+    payload: Option<&Path>,
+    force: bool,
+) -> Result<(), String> {
     // Before anything is asked of the user: a container that will be refused is
     // refused now, rather than after a passphrase has been typed for nothing.
     drop(load_container_for_embed(input)?);
+
+    // And the destination, for the same reason and at the same cost. Everything
+    // this checks was knowable before the first byte was read; leaving it to the
+    // write means learning it after the passphrase, the message and a minute of
+    // Argon2id and HILL, with nothing to show for any of it.
+    refuse_unwritable_output(output, force)?;
 
     // And for the same reason, a payload path that cannot be read is settled
     // here too — a mistyped path is exactly as much a wasted passphrase as a
@@ -727,17 +758,23 @@ fn describe_embed_failure(error: &PipelineError) -> String {
 ///
 /// # Errors
 ///
-/// Returns the message to print when the size is out of range, the payload file
-/// cannot be read, the payload does not fit, or the container cannot be
-/// generated or written.
+/// Returns the message to print when the size is out of range, the destination
+/// cannot receive a file, the payload file cannot be read, the payload does not
+/// fit, or the container cannot be generated or written.
 fn run_generate(
     output: &Path,
     input: Option<&Path>,
     width: u32,
     height: u32,
+    force: bool,
 ) -> Result<(), String> {
     let dimensions =
         ContainerDimensions::new(width, height).map_err(|err| describe_generate_failure(&err))?;
+
+    // Settled before the prompt, exactly as in `run_embed`: a destination that
+    // cannot receive a file is knowable now, and generation is the slowest thing
+    // this program does to find it out at the end.
+    refuse_unwritable_output(output, force)?;
 
     // A payload path that cannot be read is settled before the prompt, exactly
     // as in `run_embed`: a mistyped path is a wasted passphrase either way, and
@@ -966,6 +1003,73 @@ fn refuse_existing_destination(path: &Path) -> Result<(), String> {
          Choose another path, or pass --force to replace it.",
         path.display()
     ))
+}
+
+/// Refuses a destination `embed` and `generate` cannot write their image to.
+///
+/// # Why this is not [`refuse_existing_destination`]
+///
+/// The two ask what looks like the same question of the same kind of path, and
+/// they have to answer it differently, because the destinations are not the same
+/// kind of thing.
+///
+/// `extract` writes a payload whose *name* it derives from the content, so a
+/// directory is a perfectly ordinary destination there: the file is written
+/// inside it. That function therefore has to let a directory through, and
+/// teaching it to refuse one would break the case it exists to serve.
+///
+/// `embed` and `generate` write an image to a path the user named in full. A
+/// directory is not a destination they can complete — no name is derived from
+/// anything — so it is a mistake, and the only useful answer is to say so. The
+/// two functions are kept apart rather than given a flag because a shared
+/// implementation would hold a condition that reverses the verdict on the one
+/// case that separates them, which is the shape that gets edited wrong later.
+///
+/// # Why the missing folder is not created
+///
+/// Naming a folder that is not there is as likely to be a typo as an
+/// instruction, and creating directories nobody asked for is the same silent
+/// write this check exists to remove. The folder is named and nothing is
+/// touched.
+///
+/// # Errors
+///
+/// Returns the message to print when `path` is a directory, when the folder that
+/// would contain it does not exist, or when it already exists and `force` was not
+/// given. The first two are refused whatever `force` says: that flag answers
+/// "replace what is there", and neither of them is a file to replace.
+fn refuse_unwritable_output(path: &Path, force: bool) -> Result<(), String> {
+    if path.is_dir() {
+        return Err(format!(
+            "Error: {} is a directory, and --output names the file to write.\n       \
+             Give the whole path, file name included: --output {}",
+            path.display(),
+            path.join("stego.png").display()
+        ));
+    }
+
+    // An empty parent is what a bare file name yields, and it means the working
+    // directory, which exists by definition.
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.is_dir() {
+            return Err(format!(
+                "Error: the folder {} does not exist.\n       \
+                 Create it first, or choose a path inside a folder that is \
+                 already there.",
+                parent.display()
+            ));
+        }
+    }
+
+    if !force && path.exists() {
+        return Err(format!(
+            "Error: {} already exists and would be overwritten.\n       \
+             Choose another path, or pass --force to replace it.",
+            path.display()
+        ));
+    }
+
+    Ok(())
 }
 
 /// Writes the recovered payload to disk, and says nothing at all.
@@ -1657,12 +1761,108 @@ mod tests {
         assert!(
             matches!(
                 cli.command,
-                Command::Embed { input, output, payload }
+                Command::Embed { input, output, payload, force }
                     if input == Path::new("cover.png")
                         && output == Path::new("stego.png")
                         && payload.as_deref() == Some(Path::new("secret.zip"))
+                        && !force
             ),
             "embed must still parse into the same three paths"
+        );
+    }
+
+    /// A directory is refused as an output, and `--force` does not change that.
+    ///
+    /// The reported failure: `--output .\5-salida\` was accepted, the passphrase
+    /// and the message were typed, a minute of Argon2id and HILL was spent, and
+    /// the operating system refused the write at the end. Everything needed to
+    /// say no was on disk before any of it started.
+    #[test]
+    fn a_directory_is_not_an_output_path() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+
+        for force in [false, true] {
+            let message = refuse_unwritable_output(directory.path(), force)
+                .expect_err("a directory cannot receive the image");
+
+            assert!(message.contains("is a directory"), "got: {message}");
+            // The way out is the whole point: the user has to be told that the
+            // flag takes a file name, and shown one.
+            assert!(message.contains("--output"), "got: {message}");
+            assert!(message.contains("stego.png"), "got: {message}");
+        }
+    }
+
+    /// An existing file is refused, and `--force` is what replaces it.
+    ///
+    /// Without the check the write truncates it silently and reports success,
+    /// which destroys the stego image that was there and the message it carried.
+    #[test]
+    fn an_existing_output_is_refused_unless_forced() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let taken = directory.path().join("stego.png");
+        std::fs::write(&taken, b"an earlier stego image").expect("fixture write");
+
+        let message =
+            refuse_unwritable_output(&taken, false).expect_err("an existing file must be refused");
+        assert!(message.contains("stego.png"), "got: {message}");
+        assert!(message.contains("already exists"), "got: {message}");
+        assert!(message.contains("--force"), "got: {message}");
+
+        assert!(
+            refuse_unwritable_output(&taken, true).is_ok(),
+            "--force is what replaces a file that is already there"
+        );
+    }
+
+    /// A folder that is not there is named, and is not created.
+    ///
+    /// `--force` does not apply: there is no file to replace, and creating the
+    /// folder would be exactly the write nobody asked for that this check exists
+    /// to remove.
+    #[test]
+    fn a_missing_folder_is_named_and_left_alone() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let missing = directory.path().join("nowhere");
+        let destination = missing.join("stego.png");
+
+        for force in [false, true] {
+            let message = refuse_unwritable_output(&destination, force)
+                .expect_err("a missing folder must be refused");
+
+            assert!(message.contains("nowhere"), "got: {message}");
+            assert!(message.contains("does not exist"), "got: {message}");
+        }
+
+        assert!(!missing.exists(), "the folder must not have been created");
+    }
+
+    /// A free path in a folder that exists is accepted, bare name included.
+    ///
+    /// The bare name is the case a naive parent check gets wrong: `stego.png`
+    /// has an empty parent, which is the working directory rather than a folder
+    /// that is missing.
+    #[test]
+    fn a_free_destination_is_accepted() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+
+        assert!(refuse_unwritable_output(&directory.path().join("stego.png"), false).is_ok());
+        assert!(refuse_unwritable_output(Path::new("stego.png"), false).is_ok());
+    }
+
+    /// `extract` keeps the destination rules it always had.
+    ///
+    /// The two checks look alike and disagree about a directory on purpose: a
+    /// payload is written *inside* one, under a name derived from its content,
+    /// so refusing it here would break the case that function exists for.
+    #[test]
+    fn extraction_still_accepts_a_directory_as_a_destination() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+
+        assert!(refuse_existing_destination(directory.path()).is_ok());
+        assert!(
+            refuse_unwritable_output(directory.path(), false).is_err(),
+            "the two must not have been collapsed into one"
         );
     }
 

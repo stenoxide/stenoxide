@@ -99,8 +99,8 @@ cargo add stenoxide-core
 Neither the password nor the message is ever passed as an argument, so nothing
 sensitive reaches the shell history or the process table. Both validate the
 container before asking for anything, so an unusable image is refused before you
-type a passphrase — and so is a payload path that cannot be read, or an output
-file that already exists.
+type a passphrase — and so is a payload path that cannot be read, or a
+destination that cannot receive the file.
 
 ### Scan
 
@@ -185,6 +185,14 @@ size of the *compressed* payload rather than the size of your file. Ask
 When `--payload` is given, standard input is not read at all, and a path that
 does not exist, names a folder, or is empty is refused before the passphrase is
 asked for.
+
+`--output` takes the whole path of the file to write, name included. There is no
+default: a name derived from the container would record the link between cover
+and stego on your disk, which is the one relationship this hides. It is judged
+before the passphrase too — a folder, a folder that does not exist, and a file
+that is already there are all refused while it still costs you nothing, and
+`--force` is what authorises replacing that file. The same applies to
+`generate`.
 
 ### Generate
 

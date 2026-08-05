@@ -1,5 +1,36 @@
 # Changelog
 
+## [3.24.3] - 2026-08-05
+
+### Features
+- **image-io**: read the technical chunk profile of a container — [@adrian-cancio](https://github.com/adrian-cancio) ([`218c675`](https://github.com/stenoxide/stenoxide/commit/218c675a9f6d1048e4548ce54cb98ba45f79eceb))
+- **pipeline**: write PNGs that keep the container's own envelope — [@adrian-cancio](https://github.com/adrian-cancio) ([`218c675`](https://github.com/stenoxide/stenoxide/commit/218c675a9f6d1048e4548ce54cb98ba45f79eceb))
+- **crypto**: derive message keys from an ML-KEM shared secret — [@adrian-cancio](https://github.com/adrian-cancio) ([`abeb2da`](https://github.com/stenoxide/stenoxide/commit/abeb2daa1937eba35efd0a7cba8fe58b2812485d))
+- **cli**: generate and store recipient key pairs — [@adrian-cancio](https://github.com/adrian-cancio) ([`abeb2da`](https://github.com/stenoxide/stenoxide/commit/abeb2daa1937eba35efd0a7cba8fe58b2812485d))
+- **generate**: build containers against a recipient public key — [@adrian-cancio](https://github.com/adrian-cancio) ([`abeb2da`](https://github.com/stenoxide/stenoxide/commit/abeb2daa1937eba35efd0a7cba8fe58b2812485d))
+- **pipeline**: extract with a private key instead of a password — [@adrian-cancio](https://github.com/adrian-cancio) ([`abeb2da`](https://github.com/stenoxide/stenoxide/commit/abeb2daa1937eba35efd0a7cba8fe58b2812485d))
+- **core**: compare containers by their perceptual-hash salt — [@adrian-cancio](https://github.com/adrian-cancio) ([`8888118`](https://github.com/stenoxide/stenoxide/commit/888811862e93b6efe240ce08cac9faf9e76c71f8))
+- **cli**: warn when a scan finds containers that share a salt — [@adrian-cancio](https://github.com/adrian-cancio) ([`8888118`](https://github.com/stenoxide/stenoxide/commit/888811862e93b6efe240ce08cac9faf9e76c71f8))
+
+### Bug Fixes
+- **crypto**: cap decompression output to reject compression bombs — [@adrian-cancio](https://github.com/adrian-cancio) ([`9271572`](https://github.com/stenoxide/stenoxide/commit/9271572000fd875de7d36c5e6922d009a5951faa))
+- **ci**: use release-bot app token to push past the stable ruleset (#38) — [@adrian-cancio](https://github.com/adrian-cancio) ([`6c625b1`](https://github.com/stenoxide/stenoxide/commit/6c625b19ba384b18beafa889815dc04f13ffd653))
+
+### Other Changes
+- **changelog**: explain the jump from 1.7.2 to 3.7.4 — [@adrian-cancio](https://github.com/adrian-cancio) ([`d77e6cf`](https://github.com/stenoxide/stenoxide/commit/d77e6cfabc396c0ae388995e4fa4097980bfb6af))
+- **release**: carry the changelog preamble over instead of reprinting it — [@adrian-cancio](https://github.com/adrian-cancio) ([`d77e6cf`](https://github.com/stenoxide/stenoxide/commit/d77e6cfabc396c0ae388995e4fa4097980bfb6af))
+- **changelog**: list what 3.7.4 actually shipped — [@adrian-cancio](https://github.com/adrian-cancio) ([`d77e6cf`](https://github.com/stenoxide/stenoxide/commit/d77e6cfabc396c0ae388995e4fa4097980bfb6af))
+- **rulesets**: make the stable ruleset importable, and say what it still needs — [@adrian-cancio](https://github.com/adrian-cancio) ([`d77e6cf`](https://github.com/stenoxide/stenoxide/commit/d77e6cfabc396c0ae388995e4fa4097980bfb6af))
+- verify the workspace before the release job publishes anything — [@adrian-cancio](https://github.com/adrian-cancio) ([`d2c1e60`](https://github.com/stenoxide/stenoxide/commit/d2c1e60deac6f451b993e28074aef5d59e812bb2))
+- gate embedding on cost, rate and LSB invariants — [@adrian-cancio](https://github.com/adrian-cancio) ([`d2c1e60`](https://github.com/stenoxide/stenoxide/commit/d2c1e60deac6f451b993e28074aef5d59e812bb2))
+- run the embedding invariant gate against stable — [@adrian-cancio](https://github.com/adrian-cancio) ([`d2c1e60`](https://github.com/stenoxide/stenoxide/commit/d2c1e60deac6f451b993e28074aef5d59e812bb2))
+- fuzz the loader, the extraction path and decompression — [@adrian-cancio](https://github.com/adrian-cancio) ([`9271572`](https://github.com/stenoxide/stenoxide/commit/9271572000fd875de7d36c5e6922d009a5951faa))
+- **fuzz**: correct the campaign invocation in the readme — [@adrian-cancio](https://github.com/adrian-cancio) ([`9271572`](https://github.com/stenoxide/stenoxide/commit/9271572000fd875de7d36c5e6922d009a5951faa))
+- explain what the file envelope reveals and what is dropped — [@adrian-cancio](https://github.com/adrian-cancio) ([`218c675`](https://github.com/stenoxide/stenoxide/commit/218c675a9f6d1048e4548ce54cb98ba45f79eceb))
+- announce the experimental public-key mode — [@adrian-cancio](https://github.com/adrian-cancio) ([`abeb2da`](https://github.com/stenoxide/stenoxide/commit/abeb2daa1937eba35efd0a7cba8fe58b2812485d))
+- state the reuse rule in terms of the perceptual hash — [@adrian-cancio](https://github.com/adrian-cancio) ([`8888118`](https://github.com/stenoxide/stenoxide/commit/888811862e93b6efe240ce08cac9faf9e76c71f8))
+- **changelog**: add the 3.16.4 section to resolve the merge conflict with stable — [@Copilot](https://github.com/Copilot) ([`56db631`](https://github.com/stenoxide/stenoxide/commit/56db6314825ea9099fdeac38c02dc41f24ac8422))
+
 ## [3.16.4] - 2026-08-05
 
 ### Features

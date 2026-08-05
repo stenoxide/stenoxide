@@ -30,6 +30,12 @@ codegen-units = 1
 
 [workspace.dependencies]
 image = "0.25"
+# Already in the tree as a transitive dependency of `image`, which is where the
+# lock file pins it. Promoting it to a direct dependency adds nothing to what is
+# compiled; it only lets the container be written chunk by chunk instead of
+# through the one-shot encoder above, which is what makes the file layout ours
+# to choose.
+png = "0.18"
 zstd = "0.13"
 argon2 = "0.5"
 hkdf = "0.13"

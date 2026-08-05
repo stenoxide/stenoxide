@@ -137,11 +137,6 @@ Scanning ./photos ...
   stenoxide embed --input <file above> --output stego.png
 ```
 
-The last two lines name the next step with a placeholder rather than with one of
-the files listed: which of your photographs to send is not a decision this tool
-makes for you. When nothing at all can be used they are replaced by the one
-mention of `stenoxide generate`.
-
 The columns are as wide as the longest value under them, so a long file name
 pushes the whole table right rather than losing its own alignment — a path is
 never shortened, because a shortened path is not one you can act on. With
@@ -151,6 +146,11 @@ group in alphabetical order.
 The capacity shown is what the container admits after encryption. The message is
 compressed first, so ordinary text usually fits at two or three times that
 figure.
+
+The last two lines name the next step with a placeholder rather than with one of
+the files listed: which of your photographs to send is not a decision this tool
+makes for you. When nothing at all can be used they are replaced by the one
+mention of `stenoxide generate`.
 
 A recursive scan of a large folder shows a progress bar with a time estimate
 while it works. The estimate is measured in megapixels rather than in files,

@@ -1,11 +1,63 @@
 # Changelog
 
+## Why the numbers jump
+
+Versions here are calculated, not chosen. The release pipeline replays every
+Conventional Commit made since the previous tag and applies one bump per change,
+in order, so a version records how much happened rather than only the most
+significant thing that happened (see `.github/scripts/next-version.sh`). Steps
+are therefore larger than a one-bump-per-release scheme would give.
+
+Two of those steps are larger than the work behind them justifies, and the
+reason is written down here rather than left to be inferred from the sections
+below.
+
+**1.7.2 → 3.7.2 — the same breaking change counted three times.** Bringing
+`main` and `stable` back into line after the CI/CD work landed produced squash
+merges whose bodies re-listed the whole history, `chore(deps)!: raise the
+minimum supported Rust version to 1.85` among it. That commit had already been
+released in 1.7.2; the calculation met it twice more, and a breaking change is a
+major bump each time it is met: 1 → 2 → 3. Nothing broke three times. The MSRV
+was raised once, and 1.7.2 is the release that did it. The repeated entries in
+the 3.7.2 section have the same origin, which is why so many of them carry the
+hash of a single merge commit (`66ee2bd`).
+
+**3.7.2 → 3.7.4 — a release cut over an accidental revert.** #22 reverted the
+CI/CD work by mistake and `v3.7.2` was tagged directly on top of it, so the
+published 3.7.2 was missing roughly 2,900 lines — `generate`, the `scan`
+subcommand and their tests — while its changelog announced them all. #23 put the
+work back, 3.7.3 was written into `Cargo.toml` by hand to abandon the bad
+number, and the pipeline added its own patch on top of that. 3.7.4 is the
+result: the first release whose tree actually contains what the 3.7.2 section
+describes. Its own section lists only the hand bump because the reverts and
+merges around it were not Conventional Commits, and what the calculation ignores
+the changelog never sees.
+
+**If you are on 3.7.2, upgrade.** It is the only version of the two that is
+incomplete — and it is the only tag with no release behind it, since the build
+that would have published it never finished.
+
+From 3.7.4 onwards the numbers come from a history with nothing counted twice.
+They still move in large steps — 3.7.4 to 3.16.4 is nine features, with four
+smaller changes landing after the last of them — but every step in them is a
+change that was made once.
+
 ## [3.7.4] - 2026-08-04
+
+_Re-release of the 3.7.2 contents from a correct tree — see "Why the numbers
+jump" above. No user-facing change of its own beyond restoring what the
+accidental revert had taken out of 3.7.2._
 
 ### Other Changes
 - bump version to 3.7.3 by hand — [@adrian-cancio](https://github.com/adrian-cancio) ([`1f748bf`](https://github.com/stenoxide/stenoxide/commit/1f748bf77494c09e73f881ea73ec8357b31d2cd1))
 
 ## [3.7.2] - 2026-08-04
+
+_Withdrawn: this tag sits on top of an accidental revert and its binaries are
+missing the work listed below. Use 3.7.4, which ships it. The two major bumps
+between 1.7.2 and this version, and the entries repeated from 1.7.2, both come
+from merge commits that re-listed history already released — see "Why the
+numbers jump" above._
 
 ### Breaking Changes
 - **deps**: raise the minimum supported Rust version to 1.85 — [@adrian-cancio](https://github.com/adrian-cancio) ([`c62c593`](https://github.com/stenoxide/stenoxide/commit/c62c59303915cd867b20d36a5dc4f212ea2ea927))
@@ -93,6 +145,10 @@
 - credit the 0.1.0 entries by GitHub handle — [@adrian-cancio](https://github.com/adrian-cancio) ([`66ee2bd`](https://github.com/stenoxide/stenoxide/commit/66ee2bdbe9777a92e60cf11143e98da890e3d51d))
 
 ## [1.7.2] - 2026-08-04
+
+_First release made by the calculated-version pipeline. The step from 0.1.0 is
+the pipeline replaying every change accumulated since it — one MSRV break, seven
+features and two fixes — rather than a single bump._
 
 ### Breaking Changes
 - **deps**: raise the minimum supported Rust version to 1.85 — [@adrian-cancio](https://github.com/adrian-cancio) ([`11855a9`](https://github.com/stenoxide/stenoxide/commit/11855a9d81ff71740879c88702848522457979b0))

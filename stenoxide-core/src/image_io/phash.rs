@@ -96,8 +96,29 @@ const AEAD_KEYSTREAM_OFFSET: u64 = 64;
 /// container, and leaking it into a log would let an attacker confirm which
 /// image a given payload belongs to.
 ///
+/// # Why it compares and hashes, but still does not print
+///
+/// Two images that produce one salt produce one key and one nonce under any
+/// given password, so a caller holding several containers has a question worth
+/// asking about them: do any two of these collide? [`PartialEq`], [`Eq`] and
+/// [`Hash`] are derived to answer exactly that, and to answer it in linear time
+/// — grouping by salt needs a hash-map key, and comparing every pair instead
+/// would be quadratic in the size of a photo library.
+///
+/// Equality is the whole of what a caller gets. [`as_bytes`] stays
+/// crate-private and there is no public path to the 64 hash bits, so an outside
+/// program can learn that two of its own files collide and cannot learn the
+/// value that made them collide, nor compute a fingerprint it could compare
+/// against an image it does not hold.
+///
+/// The comparison is not constant time and does not need to be. Both operands
+/// are derived in-process from files the caller already has in front of them;
+/// there is no remote party feeding one side of it, and nothing timeable that
+/// the caller could not obtain by looking at the images.
+///
 /// [`MasterKey`]: crate::crypto::kdf::MasterKey
-#[derive(ZeroizeOnDrop)]
+/// [`as_bytes`]: PHashSalt::as_bytes
+#[derive(ZeroizeOnDrop, PartialEq, Eq, Hash)]
 pub struct PHashSalt([u8; PHASH_SALT_LEN]);
 
 impl PHashSalt {
@@ -770,6 +791,66 @@ mod tests {
         assert_ne!(first.as_bytes(), other.as_bytes());
     }
 
+    /// Two containers that derive one salt compare equal and land in one
+    /// bucket; an unrelated one does not.
+    ///
+    /// The property the equality surface exists for, and the reason it is not
+    /// hypothetical: the hash is *built* to survive a change of this size —
+    /// extraction could not recompute the salt otherwise — so a stego image and
+    /// the cover it was made from are one container as far as the key
+    /// derivation is concerned, and so are two frames of one burst.
+    ///
+    /// # Why the perturbation is this small
+    ///
+    /// The variant flips the least significant bit of three of the 3072 samples.
+    /// Each flip moves the luma of its pixel by at most `0.587`, and every DCT
+    /// coefficient is a weighted sum of the samples with weights in `[-1, 1]`,
+    /// so no coefficient and no median can move by more than `3 * 0.587`. A bit
+    /// therefore needs a margin below `3.52` to be at risk, and
+    /// [`stable_noise_image`] returns a container whose every margin clears
+    /// [`DELTA_MIN`] — the equality below is arithmetic, not luck.
+    #[test]
+    fn containers_that_derive_one_salt_group_together() {
+        use std::collections::HashMap;
+
+        let image = stable_noise_image(7);
+
+        let mut samples = image.pixels().to_vec();
+        for (index, sample) in samples.iter_mut().enumerate() {
+            if index % 1024 == 0 {
+                *sample ^= 1;
+            }
+        }
+        assert_ne!(samples, image.pixels(), "the variant must be another file");
+
+        let variant = ImageBuffer::new(samples, SIDE, SIDE, ColorSpace::Rgb8);
+        let unrelated = stable_noise_image(4_000);
+
+        let salt = compute_stable_phash(&image).expect("noise must hash");
+        let variant_salt = compute_stable_phash(&variant).expect("noise must hash");
+        let unrelated_salt = compute_stable_phash(&unrelated).expect("noise must hash");
+
+        assert!(
+            salt == variant_salt,
+            "a change embedding could have made must not move the salt"
+        );
+        assert!(
+            salt != unrelated_salt,
+            "two unrelated containers must not share a salt"
+        );
+
+        // And the equality is usable as a hash-map key, which is what lets a
+        // caller group a folder of containers in one pass instead of comparing
+        // every pair of them.
+        let mut buckets: HashMap<PHashSalt, usize> = HashMap::new();
+        for salt in [salt, variant_salt, unrelated_salt] {
+            *buckets.entry(salt).or_default() += 1;
+        }
+
+        assert_eq!(buckets.len(), 2, "the variant must join the image it came from");
+        assert!(buckets.values().any(|&count| count == 2));
+    }
+
     /// Flipping one hash bit changes the whole salt.
     ///
     /// The bits are packed and then hashed, so the salt is not a rearrangement
@@ -826,9 +907,9 @@ mod tests {
         let bits = [true; N_HASH_BITS];
         let prefix = ciphertext_prefix_for(&bits);
 
-        // `PHashSalt` implements neither `Debug` nor `PartialEq` — it is derived
-        // from the container and must not reach a log — so every arm below is
-        // spelled out rather than compared with `assert!(matches!(..))`.
+        // `PHashSalt` implements no `Debug` — it is derived from the container
+        // and must not reach a log — so the arms below are spelled out rather
+        // than compared with a macro that would want to print the value.
         match try_hypothesis(&bits, PASSWORD, &kdf, &prefix) {
             Ok(Some(salt)) => assert_eq!(salt.as_bytes(), salt_from_bits(&bits).as_bytes()),
             Ok(None) => panic!("the hypothesis the payload was made under must match"),

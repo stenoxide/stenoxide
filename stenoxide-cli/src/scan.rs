@@ -19,16 +19,33 @@
 //! fits at two or three times the number shown. Reporting the compressed figure
 //! instead would be a promise this layer cannot keep, because how far a payload
 //! compresses is a property of the payload.
+//!
+//! # Why the report also warns about pairs of files
+//!
+//! Which of these images can carry a payload is a question about one file at a
+//! time, and there is a second one that is not: *can these two carry a payload
+//! under the same password?* The salt that Argon2id stretches is not the image
+//! but a 64-bit perceptual hash of it, and a perceptual hash is designed to give
+//! two similar pictures the same value. Two frames of one burst, two exports of
+//! one raw file, a photograph and a slight crop of it — different files, with
+//! different pixels, and one salt between them.
+//!
+//! Under one password that means one key and one nonce for two messages, which
+//! is the mistake that breaks a stream cipher outright. Nothing about either
+//! file is wrong, so no gate can refuse them; the only place the condition is
+//! visible at all is here, where several containers are examined together.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
 use stenoxide_core::image_io::buffer::CoverSource;
+use stenoxide_core::image_io::phash::PHashSalt;
 use stenoxide_core::image_io::validate::{load_and_validate, probe_geometry};
 
 use crate::progress::Progress;
-use crate::{container_capacity, terminal_renders_unicode, ScanArgs};
+use crate::{analyse_container, terminal_renders_unicode, ScanArgs};
 
 /// The extension a container must have, in lower case.
 const PNG_EXTENSION: &str = "png";
@@ -91,6 +108,37 @@ const NOTHING_USABLE_HINT: &str = "\n\
   resort: the container does not hide that it was generated, only which of\n\
   several generated containers carries anything.\n";
 
+/// What a scan says about containers it cannot tell apart, above the list of
+/// them.
+///
+/// The heading names the condition in the terms the mistake is made in — the
+/// user picked two files, and is about to be told that the tool sees one — and
+/// leaves the mechanism to the sentence under the list. "Perceptual hash" is
+/// the accurate name and it is not the useful one here: somebody scanning a
+/// folder of holiday photographs is being warned, not taught, and the word
+/// would send them looking for a setting that does not exist.
+const SHARED_SALT_HEADING: &str =
+    "WARNING: these images are one container as far as the key is concerned.";
+
+/// What that warning says after naming the files, and what to do about it.
+///
+/// One sentence for the consequence and one for the remedy. It stops at what an
+/// attacker can do rather than at how — the how is a property of stream
+/// ciphers, and a user deciding which photograph to send does not need it —
+/// and it offers both ways out, because which of them is available depends on
+/// whether the second image has already gone somewhere.
+const SHARED_SALT_ADVICE: &str = "\
+  The key is derived from what the image looks like and from your password, so\n\
+  hiding a message in two of these under one password encrypts both under the\n\
+  same key, and anyone holding the two images can then recover what they say.\n\
+  Give each image its own password, or use only one image from each group.\n";
+
+/// The paths of a set of containers that derive one salt.
+///
+/// Never shorter than two entries: a container alone has nothing to collide
+/// with, and a warning about a single file would be a warning about nothing.
+type SaltGroup = Vec<String>;
+
 /// What a scan found in one file.
 enum Verdict {
     /// The file is a container, and this is what it can carry.
@@ -119,6 +167,21 @@ struct Entry {
     path: PathBuf,
     /// What the checks said about it.
     verdict: Verdict,
+}
+
+/// One examined file, together with the salt its perceptual hash produced.
+///
+/// The salt is kept beside the entry rather than inside its verdict because it
+/// is not a fact about that file. On its own it says nothing a user could act
+/// on; it acquires meaning only when a second container in the same scan
+/// produces the same value. It is `None` for everything the scan refused — an
+/// image with no usable hash has nothing to collide with — and it is dropped,
+/// and wiped, as soon as the grouping has been computed.
+struct Examined {
+    /// The line this file contributes to the report.
+    entry: Entry,
+    /// Salt of a usable container; `None` for anything refused.
+    salt: Option<PHashSalt>,
 }
 
 /// Runs `stenoxide scan`.
@@ -164,7 +227,7 @@ pub fn run(args: &ScanArgs) -> Result<(), String> {
         total_megapixels,
     );
 
-    let entries: Vec<Entry> = probed
+    let examined: Vec<Examined> = probed
         .into_iter()
         .map(|(path, pixels)| {
             if let Some(pixels) = pixels {
@@ -180,13 +243,25 @@ pub fn run(args: &ScanArgs) -> Result<(), String> {
 
     progress.finish();
 
+    // Computed while the salts are still in hand, and the salts are dropped
+    // with `examined` a line later: what survives into the report is a set of
+    // file names, which is all the reader needs and the only part of this that
+    // is safe to print.
+    let collisions = shared_groups(examined.iter().filter_map(|examined| {
+        let salt = examined.salt.as_ref()?;
+
+        Some((salt, examined.entry.path.display().to_string()))
+    }));
+
+    let entries: Vec<Entry> = examined.into_iter().map(|examined| examined.entry).collect();
+
     let report = if args.json {
         // Always complete, whatever `--all` says. That flag exists to keep a
         // listing readable for a person, and a script that asked for a document
         // is not helped by having records withheld from it.
-        render_json(&entries)
+        render_json(&entries, &collisions)
     } else {
-        render_listing(&args.path, &entries, args.all)
+        render_listing(&args.path, &entries, &collisions, args.all)
     };
 
     print!("{report}");
@@ -467,47 +542,94 @@ fn matches_component(name: &str, pattern: &str) -> bool {
 /// at all. Deciding which of them a person wants to *read* about belongs to the
 /// renderer; deciding it here would make the summary disagree with the number
 /// of files the scan actually looked at.
-fn examine(path: PathBuf) -> Entry {
+fn examine(path: PathBuf) -> Examined {
     let is_png = path
         .extension()
         .map(|extension| extension.to_string_lossy().to_lowercase() == PNG_EXTENSION)
         .unwrap_or(false);
 
     if !is_png {
-        return Entry {
-            path,
-            verdict: Verdict::Unusable {
-                reason: "UnsupportedFormat",
-                dimensions: None,
+        return Examined {
+            entry: Entry {
+                path,
+                verdict: Verdict::Unusable {
+                    reason: "UnsupportedFormat",
+                    dimensions: None,
+                },
             },
+            salt: None,
         };
     }
 
-    let verdict = match load_and_validate(&path) {
+    let (verdict, salt) = match load_and_validate(&path) {
         Ok(image) => {
             let dimensions = image.dimensions();
 
             // The cost layer has the last word, and it is the expensive one:
             // it is only reached for files that already passed every gate of
             // layer 1.
-            match container_capacity(&image) {
-                Some(capacity_bytes) => Verdict::Usable {
-                    dimensions,
-                    capacity_bytes,
-                },
-                None => Verdict::Unusable {
-                    reason: "InsufficientTexture",
-                    dimensions: Some(dimensions),
-                },
+            match analyse_container(&image) {
+                Some((capacity_bytes, salt)) => (
+                    Verdict::Usable {
+                        dimensions,
+                        capacity_bytes,
+                    },
+                    Some(salt),
+                ),
+                None => (
+                    Verdict::Unusable {
+                        reason: "InsufficientTexture",
+                        dimensions: Some(dimensions),
+                    },
+                    None,
+                ),
             }
         }
         Err(error) => {
             let (reason, dimensions) = describe(&error);
-            Verdict::Unusable { reason, dimensions }
+            (Verdict::Unusable { reason, dimensions }, None)
         }
     };
 
-    Entry { path, verdict }
+    Examined {
+        entry: Entry { path, verdict },
+        salt,
+    }
+}
+
+/// Groups the names of the things that share a key, dropping every key only one
+/// of them carries.
+///
+/// Generic over the key so that the grouping can be exercised without building
+/// a container for every case: what has to hold is a property of the algorithm
+/// — groups in the order they were opened, names in the order they arrived,
+/// singletons discarded — and none of that is about perceptual hashes.
+///
+/// # Cost
+///
+/// One hash-map entry per named item, holding a borrow of its key, and one
+/// vector per group: linear in both time and memory. The obvious alternative is
+/// to compare every pair, which is quadratic, and a recursive scan over a photo
+/// library is exactly where that stops being free.
+fn shared_groups<Key: Eq + Hash>(named: impl IntoIterator<Item = (Key, String)>) -> Vec<SaltGroup> {
+    let mut opened: HashMap<Key, usize> = HashMap::new();
+    let mut groups: Vec<SaltGroup> = Vec::new();
+
+    for (key, name) in named {
+        // A key seen before names the group it opened; a new one is recorded
+        // against the index the group it is about to open will have, which is
+        // the only index `get_mut` can fail to find. That is what makes the
+        // `None` arm the "first of its kind" case rather than an error path.
+        let index = *opened.entry(key).or_insert(groups.len());
+
+        match groups.get_mut(index) {
+            Some(group) => group.push(name),
+            None => groups.push(vec![name]),
+        }
+    }
+
+    groups.retain(|group| group.len() > 1);
+    groups
 }
 
 /// The short name of a validation failure, and the dimensions it carries.
@@ -559,8 +681,13 @@ fn listing_marks() -> Marks {
 }
 
 /// The human-readable report.
-fn render_listing(argument: &str, entries: &[Entry], all: bool) -> String {
-    render_listing_with(listing_marks(), argument, entries, all)
+fn render_listing(
+    argument: &str,
+    entries: &[Entry],
+    collisions: &[SaltGroup],
+    all: bool,
+) -> String {
+    render_listing_with(listing_marks(), argument, entries, collisions, all)
 }
 
 /// The human-readable report, with the marks decided by the caller.
@@ -578,7 +705,13 @@ fn render_listing(argument: &str, entries: &[Entry], all: bool) -> String {
 /// path instead is not an option, and never was: a shortened path is not a path
 /// the user can act on. So the width is the widest value the listing actually
 /// carries, which keeps the original decision and removes the failure.
-fn render_listing_with(marks: Marks, argument: &str, entries: &[Entry], all: bool) -> String {
+fn render_listing_with(
+    marks: Marks,
+    argument: &str,
+    entries: &[Entry],
+    collisions: &[SaltGroup],
+    all: bool,
+) -> String {
     let (usable_mark, unusable_mark) = marks;
 
     let mut usable = 0usize;
@@ -685,6 +818,14 @@ fn render_listing_with(marks: Marks, argument: &str, entries: &[Entry], all: boo
         let _ = writeln!(report, "  Run with --all to see why an image was rejected.");
     }
 
+    // Between the summary and the pointer onwards, which is where it changes
+    // what the reader does next: the summary has just told them how many
+    // containers they have, and the pointer is about to tell them to use one.
+    // Nothing is printed at all when no two containers collide — a warning that
+    // appears on every scan is a warning people learn to scroll past, and this
+    // one has to survive being read for the first time on the day it matters.
+    let _ = write!(report, "{}", render_collisions(collisions));
+
     // One pointer or the other, never both and never neither when something was
     // scanned. Written as one branch rather than two conditions so that the
     // exclusivity is a property of the code instead of a coincidence between two
@@ -696,6 +837,32 @@ fn render_listing_with(marks: Marks, argument: &str, entries: &[Entry], all: boo
     }
 
     report
+}
+
+/// The warning about containers that derive one salt, or nothing at all.
+///
+/// Groups are listed one per paragraph and the explanation is given once, under
+/// all of them. The alternative — repeating the consequence beside every group
+/// — was rejected for the reason the whole block exists: a reader who meets the
+/// same four lines three times reads them none of those times.
+fn render_collisions(groups: &[SaltGroup]) -> String {
+    if groups.is_empty() {
+        return String::new();
+    }
+
+    let mut block = String::new();
+    let _ = writeln!(block, "\n  {SHARED_SALT_HEADING}");
+
+    for group in groups {
+        let _ = writeln!(block);
+        for path in group {
+            let _ = writeln!(block, "    {path}");
+        }
+    }
+
+    let _ = write!(block, "\n{SHARED_SALT_ADVICE}");
+
+    block
 }
 
 /// The width a column needs: its heading, or the widest value under it.
@@ -714,11 +881,21 @@ fn column_width<'value>(heading: &str, values: impl Iterator<Item = &'value str>
 /// The machine-readable report.
 ///
 /// Assembled by hand rather than through a serialisation crate. The document
-/// has three fixed keys and two shapes of record, none of which is going to
-/// grow a field without this function being edited anyway, and the only value
-/// that is not a number is a path — see [`escape`] for the one thing that has
-/// to be got right about that.
-fn render_json(entries: &[Entry]) -> String {
+/// has a handful of fixed keys and two shapes of record, none of which is going
+/// to grow a field without this function being edited anyway, and the only
+/// value that is not a number is a path — see [`escape`] for the one thing that
+/// has to be got right about that.
+///
+/// # Why `salt_collisions` is absent rather than empty
+///
+/// Every key that was ever emitted is still emitted, in the position it was
+/// always in, because programs read this document. The new key is the exception
+/// in the other direction: it appears only when there is a collision to report,
+/// so a scan that finds none produces the document it has always produced, byte
+/// for byte. A consumer that wants the field unconditionally reads it as absent
+/// meaning empty, which is the same answer with one fewer way for a script that
+/// predates the field to change behaviour.
+fn render_json(entries: &[Entry], collisions: &[SaltGroup]) -> String {
     let mut valid = Vec::new();
     let mut invalid = Vec::new();
 
@@ -747,8 +924,26 @@ fn render_json(entries: &[Entry]) -> String {
         }
     };
 
+    let groups: Vec<String> = collisions
+        .iter()
+        .map(|group| {
+            let paths: Vec<String> = group
+                .iter()
+                .map(|path| format!("      \"{}\"", escape(path)))
+                .collect();
+
+            format!("    [\n{}\n    ]", paths.join(",\n"))
+        })
+        .collect();
+
+    let salt_collisions = if groups.is_empty() {
+        String::new()
+    } else {
+        format!(",\n  \"salt_collisions\": [\n{}\n  ]", groups.join(",\n"))
+    };
+
     format!(
-        "{{\n  \"valid\": {},\n  \"invalid\": {},\n  \"summary\": {{\n    \"scanned\": {},\n    \"valid\": {},\n    \"invalid\": {}\n  }}\n}}\n",
+        "{{\n  \"valid\": {},\n  \"invalid\": {},\n  \"summary\": {{\n    \"scanned\": {},\n    \"valid\": {},\n    \"invalid\": {}\n  }}{salt_collisions}\n}}\n",
         render(&valid),
         render(&invalid),
         valid.len() + invalid.len(),
@@ -884,7 +1079,7 @@ mod tests {
     /// An empty scan is a valid document with three empty answers.
     #[test]
     fn an_empty_scan_renders_an_empty_document() {
-        let rendered = render_json(&[]);
+        let rendered = render_json(&[], &[]);
 
         assert!(rendered.contains("\"valid\": []"), "got: {rendered}");
         assert!(rendered.contains("\"invalid\": []"), "got: {rendered}");
@@ -911,7 +1106,7 @@ mod tests {
             },
         ];
 
-        let rendered = render_json(&entries);
+        let rendered = render_json(&entries, &[]);
 
         assert!(
             rendered.contains("\"path\": \"good.png\""),
@@ -981,7 +1176,7 @@ mod tests {
             },
         ];
 
-        let rendered = render_listing("./photos", &entries, true);
+        let rendered = render_listing("./photos", &entries, &[], true);
 
         assert!(rendered.contains("Scanning ./photos"), "got: {rendered}");
         assert!(rendered.contains("photos/good.png"), "got: {rendered}");
@@ -1040,7 +1235,7 @@ mod tests {
         ];
 
         for marks in MARK_SETS {
-            let rendered = render_listing_with(marks, ".", &entries, false);
+            let rendered = render_listing_with(marks, ".", &entries, &[], false);
             let table = table_of(&rendered);
 
             assert_eq!(table.len(), 4, "a heading and three rows: {rendered}");
@@ -1099,7 +1294,7 @@ mod tests {
         ];
 
         for marks in MARK_SETS {
-            let rendered = render_listing_with(marks, ".", &entries, true);
+            let rendered = render_listing_with(marks, ".", &entries, &[], true);
             let table = table_of(&rendered);
 
             assert_eq!(table.len(), 4, "a heading and three rows: {rendered}");
@@ -1179,7 +1374,7 @@ mod tests {
             },
         ];
 
-        let rendered = render_listing(".", &entries, true);
+        let rendered = render_listing(".", &entries, &[], true);
         let order: Vec<&str> = table_of(&rendered)
             .into_iter()
             .skip(1)
@@ -1218,17 +1413,17 @@ mod tests {
 
         let note = "* Estimated payload capacity";
 
-        let only_usable = render_listing(".", &[usable()], false);
+        let only_usable = render_listing(".", &[usable()], &[], false);
         assert!(only_usable.contains(CAPACITY_HEADING), "got: {only_usable}");
         assert!(only_usable.contains(note), "got: {only_usable}");
 
-        let both = render_listing(".", &[usable(), rejected()], true);
+        let both = render_listing(".", &[usable(), rejected()], &[], true);
         assert!(both.contains(CAPACITY_AND_REASON_HEADING), "got: {both}");
         assert!(both.contains(note), "got: {both}");
 
         // Nothing usable: no capacity is listed, so neither the asterisk nor the
         // note it belongs to appears at all.
-        let only_rejected = render_listing(".", &[rejected()], true);
+        let only_rejected = render_listing(".", &[rejected()], &[], true);
         assert!(only_rejected.contains(REASON_HEADING), "got: {only_rejected}");
         assert!(!only_rejected.contains('*'), "got: {only_rejected}");
         assert!(only_rejected.contains(PATH_HEADING), "got: {only_rejected}");
@@ -1240,7 +1435,7 @@ mod tests {
     /// coming.
     #[test]
     fn an_empty_table_has_no_headings() {
-        let rendered = render_listing(".", &[], true);
+        let rendered = render_listing(".", &[], &[], true);
 
         assert!(!rendered.contains(PATH_HEADING), "got: {rendered}");
         assert!(rendered.contains("0 scanned"), "got: {rendered}");
@@ -1271,7 +1466,7 @@ mod tests {
         ];
 
         for marks in MARK_SETS {
-            let rendered = render_listing_with(marks, ".", &entries, true);
+            let rendered = render_listing_with(marks, ".", &entries, &[], true);
 
             for line in rendered.lines() {
                 assert_eq!(
@@ -1299,7 +1494,7 @@ mod tests {
             },
         }];
 
-        let listing = render_listing(".", &refused, true);
+        let listing = render_listing(".", &refused, &[], true);
         assert!(listing.contains("stenoxide generate"), "got: {listing}");
         assert!(
             listing.contains("does not hide that it was generated"),
@@ -1314,10 +1509,10 @@ mod tests {
                 capacity_bytes: 8_300,
             },
         });
-        assert!(!render_listing(".", &mixed, true).contains("stenoxide generate"));
+        assert!(!render_listing(".", &mixed, &[], true).contains("stenoxide generate"));
 
         // Nothing was scanned at all, so there is nothing to conclude from.
-        assert!(!render_listing(".", &[], true).contains("stenoxide generate"));
+        assert!(!render_listing(".", &[], &[], true).contains("stenoxide generate"));
     }
 
     /// A scan that found a container names the command that uses one.
@@ -1335,7 +1530,7 @@ mod tests {
             },
         }];
 
-        let listing = render_listing(".", &entries, false);
+        let listing = render_listing(".", &entries, &[], false);
 
         assert!(listing.contains("stenoxide embed"), "got: {listing}");
         assert!(
@@ -1366,11 +1561,11 @@ mod tests {
             },
         };
 
-        let found = render_listing(".", &[usable(), rejected()], true);
+        let found = render_listing(".", &[usable(), rejected()], &[], true);
         assert!(found.contains("stenoxide embed"), "got: {found}");
         assert!(!found.contains("stenoxide generate"), "got: {found}");
 
-        let empty_handed = render_listing(".", &[rejected()], true);
+        let empty_handed = render_listing(".", &[rejected()], &[], true);
         assert!(
             empty_handed.contains("stenoxide generate"),
             "got: {empty_handed}"
@@ -1380,7 +1575,7 @@ mod tests {
             "got: {empty_handed}"
         );
 
-        let nothing = render_listing(".", &[], true);
+        let nothing = render_listing(".", &[], &[], true);
         assert!(!nothing.contains("stenoxide embed"), "got: {nothing}");
         assert!(!nothing.contains("stenoxide generate"), "got: {nothing}");
     }
@@ -1397,7 +1592,160 @@ mod tests {
             },
         }];
 
-        assert!(render_listing(".", &entries, false).contains("--all"));
-        assert!(!render_listing(".", &entries, true).contains("--all"));
+        assert!(render_listing(".", &entries, &[], false).contains("--all"));
+        assert!(!render_listing(".", &entries, &[], true).contains("--all"));
+    }
+
+    /// A usable container at `path`, for the collision tests below.
+    fn container(path: &str) -> Entry {
+        Entry {
+            path: PathBuf::from(path),
+            verdict: Verdict::Usable {
+                dimensions: (2000, 2000),
+                capacity_bytes: 8_300,
+            },
+        }
+    }
+
+    /// Only a key more than one file carries becomes a group, and a group keeps
+    /// the order the scan met it in.
+    ///
+    /// Order is not a nicety here. The listing is sorted so that two runs over
+    /// one directory can be compared, and a warning whose files moved between
+    /// runs would be the one part of the report nobody could diff.
+    #[test]
+    fn a_group_needs_more_than_one_file_to_exist() {
+        let groups = shared_groups([
+            ("a", "first.png".to_owned()),
+            ("b", "alone.png".to_owned()),
+            ("a", "second.png".to_owned()),
+            ("c", "third.png".to_owned()),
+            ("c", "fourth.png".to_owned()),
+            ("a", "fifth.png".to_owned()),
+        ]);
+
+        assert_eq!(
+            groups,
+            vec![
+                vec![
+                    "first.png".to_owned(),
+                    "second.png".to_owned(),
+                    "fifth.png".to_owned()
+                ],
+                vec!["third.png".to_owned(), "fourth.png".to_owned()],
+            ]
+        );
+
+        // One container has nothing to collide with, and neither has none.
+        assert!(shared_groups([("a", "only.png".to_owned())]).is_empty());
+        assert!(shared_groups(Vec::<(&str, String)>::new()).is_empty());
+    }
+
+    /// The listing names the files that share a salt, says what it costs and
+    /// what to do, and leaves them usable.
+    ///
+    /// The last part is the one worth asserting: a collision is not a defect in
+    /// either file. Both are still listed, still carry a capacity and are still
+    /// counted as valid — what the user cannot do is give the two of them one
+    /// password.
+    #[test]
+    fn the_listing_warns_about_containers_that_share_a_salt() {
+        let entries = vec![
+            container("burst-01.png"),
+            container("burst-02.png"),
+            container("unrelated.png"),
+        ];
+        let collisions = vec![vec!["burst-01.png".to_owned(), "burst-02.png".to_owned()]];
+
+        let warned = render_listing(".", &entries, &collisions, false);
+
+        assert!(warned.contains(SHARED_SALT_HEADING), "got: {warned}");
+        assert!(warned.contains("burst-01.png"), "got: {warned}");
+        assert!(warned.contains("burst-02.png"), "got: {warned}");
+        assert!(
+            warned.contains("under one password encrypts both under the"),
+            "the warning must say what the mistake costs: {warned}"
+        );
+        assert!(
+            warned.contains("Give each image its own password"),
+            "the warning must say what to do instead: {warned}"
+        );
+        assert!(
+            warned.contains("Summary: 3 valid, 0 invalid (3 scanned)"),
+            "a collision must not make a container invalid: {warned}"
+        );
+
+        // Between the count and the pointer onwards: after the reader has been
+        // told what they have, before they are told to use one of it.
+        let summary = warned.find("Summary:").unwrap_or(usize::MAX);
+        let warning = warned.find(SHARED_SALT_HEADING).unwrap_or(0);
+        let pointer = warned.find("stenoxide embed").unwrap_or(0);
+        assert!(summary < warning && warning < pointer, "got: {warned}");
+    }
+
+    /// With nothing to warn about, the listing is exactly the one this scan has
+    /// always printed.
+    ///
+    /// Asserted as an equality against the warned form with the block cut back
+    /// out of it, rather than by looking for the absence of a word: what has to
+    /// hold is that not one other character moved, because a warning that
+    /// rearranges the ordinary report is a warning that shows up in every scan.
+    #[test]
+    fn a_scan_with_no_collision_prints_what_it_always_did() {
+        let entries = vec![container("a.png"), container("b.png")];
+        let collisions = vec![vec!["a.png".to_owned(), "b.png".to_owned()]];
+
+        for all in [false, true] {
+            let quiet = render_listing(".", &entries, &[], all);
+            let warned = render_listing(".", &entries, &collisions, all);
+
+            assert!(!quiet.contains("WARNING"), "got: {quiet}");
+            assert_eq!(
+                quiet,
+                warned.replace(&render_collisions(&collisions), ""),
+                "the warning changed more of the listing than its own block"
+            );
+        }
+    }
+
+    /// The document grows one key, at the end, and only when there is something
+    /// to put in it.
+    ///
+    /// The positions are compared rather than the presence of each key: a
+    /// program consuming this document was written against the layout it had,
+    /// and the assertion that nothing moved is stronger — and easier to keep
+    /// true — than a list of keys that are still somewhere in it.
+    #[test]
+    fn the_document_grows_the_groups_without_moving_anything() {
+        let entries = vec![container("a.png"), container(r"photos\b.png")];
+        let collisions = vec![vec!["a.png".to_owned(), r"photos\b.png".to_owned()]];
+
+        let quiet = render_json(&entries, &[]);
+        let warned = render_json(&entries, &collisions);
+
+        assert!(
+            !quiet.contains("salt_collisions"),
+            "a scan with no collision must produce the document it always did: {quiet}"
+        );
+
+        let positions = |document: &str| {
+            ["\"valid\"", "\"invalid\"", "\"summary\"", "\"scanned\""]
+                .map(|key| document.find(key))
+        };
+        assert_eq!(
+            positions(&quiet),
+            positions(&warned),
+            "an existing key moved: {warned}"
+        );
+
+        let groups = warned.find("\"salt_collisions\"").unwrap_or(0);
+        assert!(
+            groups > warned.find("\"summary\"").unwrap_or(usize::MAX),
+            "the new key must come after the ones that were already there: {warned}"
+        );
+        assert!(warned.contains("\"a.png\""), "got: {warned}");
+        // Escaped like every other path in the document, or the separator of
+        // the platform this runs on would break the string it sits in.
+        assert!(warned.contains(r#""photos\\b.png""#), "got: {warned}");
     }
 }

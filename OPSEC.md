@@ -65,11 +65,31 @@ key-and-nonce pair is the single mistake that breaks a stream cipher outright:
 an attacker who holds both images can combine them and recover the relationship
 between the two messages without touching the key at all. Both messages fall.
 
-**There is no warning and no recovery.** stenoxide cannot detect this. It does
-not remember what you have embedded before, and it is not supposed to — a tool
-that kept a history of your messages would be a worse liability than the mistake
-it prevented. Once two messages have gone out under one pair, the damage is done
-and nothing can undo it.
+### "The same image" does not mean "the same file"
+
+This is the part of the rule that catches people, and the rule as stated above
+does not say it.
+
+What enters the derivation is not the image. It is a 64-bit **perceptual hash**
+of it — a summary of what the picture looks like, computed over a 32x32
+thumbnail, which the recipient recomputes from the image they received in order
+to arrive at the same salt. A perceptual hash is built to give one value to
+pictures that look alike. That is not a limitation of this one: it is the entire
+purpose of the construction, and it is what lets a stego image still hash to
+what its cover hashed to, without which extraction could not work at all.
+
+So two files can differ in every way a computer measures — different pixels,
+different file sizes, different checksums — and still be **one container** as
+far as the key is concerned. It happens with the pictures people actually own:
+
+- Two frames of the same burst, taken a fraction of a second apart.
+- Two exports of one raw file, at different settings.
+- A crop, a resize or a slight recolour of a photograph.
+- The same scene shot twice from a tripod that did not move between them.
+
+None of this is you breaking the rule. Each of them is you doing what the rule
+appears to ask — reaching for another photograph — and landing on the same key
+anyway.
 
 ### What this forbids, concretely
 
@@ -83,16 +103,75 @@ and nothing can undo it.
   resized, slightly recoloured. The hash is *perceptual*: it is built to be
   unchanged by edits that leave the picture looking the same, which is exactly
   what makes this dangerous rather than safe.
+- **Using the same password with two pictures of the same thing.** The case
+  above at least looks like one file; this one does not look like a mistake at
+  all. Two frames of a burst are two files, taken separately, that a person
+  would call two different photographs — and the hash reads them as one.
 - **Re-sending "the same message" after a failed delivery, using the same pair.**
   If anything about the message changed — a corrected typo, a new timestamp — it
   is a second message.
 
+### What the tool can tell you, and what it cannot
+
+**No history is kept, and none will be.** stenoxide does not remember what you
+have embedded before, and it is not supposed to: a file listing the containers
+you have used would be exactly the evidence the rest of the design exists to
+avoid leaving. Nothing can warn you that the image and password you are about to
+use repeat something you sent last year.
+
+**What it can do is compare the images you show it at once.** `stenoxide scan`
+computes the hash of every container it accepts, and when two of them come out
+equal it names them together:
+
+    Scanning ./photos ...
+
+      ✓ ./photos/beach-01.png  4000x3000  ~46.9 KB
+      ✓ ./photos/beach-02.png  4000x3000  ~46.9 KB
+      ✓ ./photos/garden.png    3000x2000  ~23.4 KB
+
+      * Estimated payload capacity after encryption overhead
+      Summary: 3 valid, 0 invalid (3 scanned)
+
+      WARNING: these images are one container as far as the key is concerned.
+
+        ./photos/beach-01.png
+        ./photos/beach-02.png
+
+      The key is derived from what the image looks like and from your password,
+      so hiding a message in two of these under one password encrypts both under
+      the same key, and anyone holding the two images can then recover what they
+      say. Give each image its own password, or use only one image from each
+      group.
+
+Read it as a list of sets, one per blank-separated block: every file inside a
+block is the same container as every other file in that block. The files are
+still perfectly usable — the summary still counts them as valid, and each still
+reports a capacity — and a scan that finds no such pair prints nothing at all,
+which is what makes the warning worth reading on the day it appears. Under
+`--json` the same grouping is the `salt_collisions` key, an array of arrays of
+paths, present only when there is something in it.
+
+Two limits are worth knowing. It compares only the files you gave it, so run it
+with `--recursive` when copies of your photographs live in more than one folder,
+and remember that a collision with an image elsewhere on the disk — or with one
+you sent last month — is still yours to avoid. And it is a warning about the
+present scan, not about your history.
+
+**And there is still no recovery.** Once two messages have gone out under one
+pair, the damage is done and nothing can undo it.
+
 ### How to stay on the right side of it
 
-Change the image. A different photograph is a different container, a different
-salt, a different key and a different nonce, and it costs you nothing. Changing
-the password instead also works, but a fresh image is easier to get right
-because you can see that it is different.
+Change the image, and change it enough that it is a different *picture* and not
+another version of the same one. A photograph of a different subject is a
+different container, a different salt, a different key and a different nonce,
+and it costs you nothing. Another frame of the shot you already used may be
+none of those things.
+
+When the two candidates are at all alike, run `stenoxide scan` over both before
+you choose: that is what the warning above is for, and it settles in a second a
+question you cannot answer by eye. Changing the password instead also works —
+and it is the only remedy when you have already sent one of the pair.
 
 ---
 
@@ -100,7 +179,8 @@ because you can see that it is different.
 
 Run `stenoxide scan` over your candidates before you commit to one. It applies
 the same gates the embedding path applies and tells you which images are usable
-and how much each can carry.
+and how much each can carry — and, when two of the candidates turn out to be one
+container, it says so; see the rule above for why that matters.
 
 **A good container:**
 
@@ -383,11 +463,16 @@ the more dangerous error.
 
 In order of how much damage the mistake does:
 
-1. **Reusing an image-and-password pair.** Breaks the encryption outright.
+1. **Reusing an image-and-password pair.** Breaks the encryption outright — and
+   two pictures of the same thing count as one image, which is how this is
+   usually done by accident.
 2. **Using a container that exists anywhere else.** Makes the embedding visible
    to anyone who finds the original.
 3. **Sending it through a channel that recompresses.** Destroys the payload.
 4. **A weak password.** Turns an infeasible attack into an expensive one.
 
-The first two are not caught by anything in the tool. They are yours to get
-right.
+Neither of the first two is caught for you in general: the tool has no memory of
+what you sent before, and it cannot know what else exists in the world. The one
+part of them it does catch is two look-alike containers inside a single scan,
+which is a reason to run `scan` and not a reason to stop thinking about either
+rule.

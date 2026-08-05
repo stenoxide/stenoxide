@@ -146,7 +146,7 @@ use stenoxide_core::generate::{
     MIN_CONTAINER_SIDE,
 };
 use stenoxide_core::image_io::buffer::ImageBuffer;
-use stenoxide_core::image_io::phash::{compute_stable_phash, PHashError};
+use stenoxide_core::image_io::phash::{compute_stable_phash, PHashError, PHashSalt};
 use stenoxide_core::image_io::validate::{load_and_validate, ValidationError};
 use stenoxide_core::pipeline::{EmbedPipeline, EmbedReport, PipelineError};
 use stenoxide_core::stego::sizer::{compute_capacity, EmbeddingMode, SizerError};
@@ -1708,10 +1708,17 @@ fn write_artifact(bytes: &[u8], what: &str) -> Result<(), String> {
         .map_err(|err| format!("Error: could not write the {what}: {err}"))
 }
 
-/// Payload bytes `image` can carry, after encryption.
+/// Payload bytes `image` can carry after encryption, and the salt its
+/// perceptual hash derives.
 ///
 /// `None` when a layer above the loader refuses the container, which is a
 /// verdict of "unusable" rather than a capacity of zero.
+///
+/// The salt is returned rather than discarded because the gate below already
+/// computes it, and because it is the only thing that can tell a caller holding
+/// two containers that they are one container: the key and the nonce come from
+/// this value and the password, so two images that produce it are
+/// indistinguishable to the derivation. `scan` uses it for exactly that.
 ///
 /// # Why the hash is checked here and not only the cost map
 ///
@@ -1725,12 +1732,15 @@ fn write_artifact(bytes: &[u8], what: &str) -> Result<(), String> {
 /// That makes the hash a load-bearing part of the answer rather than a detail
 /// of the embedding path: without it `scan` would report a smooth photograph as
 /// a usable container and `embed` would refuse the very same file.
-fn container_capacity(image: &ImageBuffer) -> Option<usize> {
-    compute_stable_phash(image).ok()?;
+fn analyse_container(image: &ImageBuffer) -> Option<(usize, PHashSalt)> {
+    let salt = compute_stable_phash(image).ok()?;
 
     let cost_map = HillCostProvider::new().compute(image).ok()?;
 
-    Some(compute_capacity(&cost_map, EmbeddingMode::Symmetric).available_bytes())
+    Some((
+        compute_capacity(&cost_map, EmbeddingMode::Symmetric).available_bytes(),
+        salt,
+    ))
 }
 
 /// Whether the terminal can be expected to render the marks `scan` prints.

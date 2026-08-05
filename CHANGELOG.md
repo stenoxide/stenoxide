@@ -49,6 +49,42 @@ change that was made once.
 ### Features
 - **crypto**: establish the payload key by ML-KEM-1024 encapsulation behind the `pqc` feature — a `keygen` subcommand, `--recipient` on `generate`, and `--identity` on `extract`, with the key files kept as pasteable single lines. The mode is **experimental**: its format is not yet settled and is compiled only with `--features pqc`.
 
+## [3.16.4] - 2026-08-05
+
+### Features
+- **cli**: shell completions and man page generation — [@adrian-cancio](https://github.com/adrian-cancio) ([`62788fd`](https://github.com/stenoxide/stenoxide/commit/62788fd45b68307ba88199d3aac87b5da5004e58))
+- **cli**: point to scan when embed rejects a container — [@adrian-cancio](https://github.com/adrian-cancio) ([`62788fd`](https://github.com/stenoxide/stenoxide/commit/62788fd45b68307ba88199d3aac87b5da5004e58))
+- **cli**: name the next command when scan finds a container — [@adrian-cancio](https://github.com/adrian-cancio) ([`a4af1c3`](https://github.com/stenoxide/stenoxide/commit/a4af1c311ce4d925c6ef1fa3c1a645dba2051e60))
+- **cli**: short flags for the paths every subcommand takes — [@adrian-cancio](https://github.com/adrian-cancio) ([`a4af1c3`](https://github.com/stenoxide/stenoxide/commit/a4af1c311ce4d925c6ef1fa3c1a645dba2051e60))
+- Add shell completions, man page generation, and CLI examples (#26) — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+- **cli**: shell completions and man page generation — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+- **cli**: point to scan when embed rejects a container — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+- **cli**: name the next command when scan finds a container — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+- **cli**: short flags for the paths every subcommand takes — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+
+### Bug Fixes
+- **cli**: validate the output path before asking for the password — [@adrian-cancio](https://github.com/adrian-cancio) ([`a4af1c3`](https://github.com/stenoxide/stenoxide/commit/a4af1c311ce4d925c6ef1fa3c1a645dba2051e60))
+- **cli**: align the scan listing on the paths it prints — [@adrian-cancio](https://github.com/adrian-cancio) ([`a4af1c3`](https://github.com/stenoxide/stenoxide/commit/a4af1c311ce4d925c6ef1fa3c1a645dba2051e60))
+- **cli**: judge the output path before the passphrase, and align the scan listing (#27) — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+- **cli**: validate the output path before asking for the password — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+- **cli**: align the scan listing on the paths it prints — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+
+### Other Changes
+- scope assistant file access to the shipped crates (#25) — [@adrian-cancio](https://github.com/adrian-cancio) ([`2ef1225`](https://github.com/stenoxide/stenoxide/commit/2ef1225213479190b7d0376a3f564ff5c1c7c5b6))
+- **cli**: quickstart examples in the top-level long help — [@adrian-cancio](https://github.com/adrian-cancio) ([`62788fd`](https://github.com/stenoxide/stenoxide/commit/62788fd45b68307ba88199d3aac87b5da5004e58))
+- **cli**: name what a container and a payload are — [@adrian-cancio](https://github.com/adrian-cancio) ([`62788fd`](https://github.com/stenoxide/stenoxide/commit/62788fd45b68307ba88199d3aac87b5da5004e58))
+- **cli**: name the payload type and the limits of typed input — [@adrian-cancio](https://github.com/adrian-cancio) ([`a4af1c3`](https://github.com/stenoxide/stenoxide/commit/a4af1c311ce4d925c6ef1fa3c1a645dba2051e60))
+- **cli**: keep the extract help in its compact form — [@adrian-cancio](https://github.com/adrian-cancio) ([`a4af1c3`](https://github.com/stenoxide/stenoxide/commit/a4af1c311ce4d925c6ef1fa3c1a645dba2051e60))
+- order the scan section from the table to what follows it — [@adrian-cancio](https://github.com/adrian-cancio) ([`a4af1c3`](https://github.com/stenoxide/stenoxide/commit/a4af1c311ce4d925c6ef1fa3c1a645dba2051e60))
+- force squash into main and merge commits into stable (#28) — [@adrian-cancio](https://github.com/adrian-cancio) ([`cc3bd0b`](https://github.com/stenoxide/stenoxide/commit/cc3bd0b14b7bf332337f72357459a8a256d992d7))
+- scope assistant file access to the shipped crates (#25) — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+- **cli**: quickstart examples in the top-level long help — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+- **cli**: name what a container and a payload are — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+- **cli**: name the payload type and the limits of typed input — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+- **cli**: keep the extract help in its compact form — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+- order the scan section from the table to what follows it — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+- force squash into main and merge commits into stable (#28) — [@adrian-cancio](https://github.com/adrian-cancio) ([`381ca2e`](https://github.com/stenoxide/stenoxide/commit/381ca2ee14f2261b74db3c40bd42d8ae8f29f602))
+
 ## [3.7.4] - 2026-08-04
 
 _First installable release since 1.7.2, and the one that ships the work below.

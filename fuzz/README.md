@@ -38,9 +38,11 @@ cargo run --release --bin seed_corpus
 cargo +nightly fuzz run decompress -- -runs=1000
 
 # the real thing. Two hours, both cores, and stop on the first finding.
-cargo +nightly fuzz run loader -- -runs=0 -max_total_time=7200 -jobs=2
-cargo +nightly fuzz run extract -- -runs=0 -max_total_time=7200 -jobs=2
-cargo +nightly fuzz run decompress -- -runs=0 -max_total_time=7200 -jobs=2
+# Note the omission of -runs: 0 means "no runs" and ends the campaign after the
+# corpus; omitting it (or -runs=-1) runs until -max_total_time expires.
+cargo +nightly fuzz run loader -- -max_total_time=7200 -jobs=2
+cargo +nightly fuzz run extract -- -max_total_time=7200 -jobs=2
+cargo +nightly fuzz run decompress -- -max_total_time=7200 -jobs=2
 ```
 
 `decompress` is the target the decompression ceiling in `crypto::aead` was

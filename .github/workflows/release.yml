@@ -131,14 +131,24 @@ jobs:
           # Rebuilt rather than prepended to: the new section belongs under the
           # document title, not above it.
           #
+          # Everything above the first version section is carried over rather
+          # than reprinted. That is where the title lives, and with it any prose
+          # explaining the numbering itself — reprinting a bare title would
+          # delete that note on the next release and leave the reader with the
+          # jumps and no account of them.
+          #
           # Any section already written for this version is dropped as the rest
           # is carried over, so the freshly rendered one replaces it instead of
           # joining it. That happens when a release commit landed but the run
           # that followed it did not finish — the tag is only created at the very
           # end, so nothing stops the same version being attempted again.
           {
-            echo "# Changelog"
-            echo
+            if [ -f CHANGELOG.md ] && grep -q '^## \[' CHANGELOG.md; then
+              awk 'index($0, "## [") == 1 { exit } { print }' CHANGELOG.md
+            else
+              echo "# Changelog"
+              echo
+            fi
             cat .changelog-entry
             if [ -f CHANGELOG.md ]; then
               awk -v hdr="## [${{ steps.version.outputs.next }}]" '

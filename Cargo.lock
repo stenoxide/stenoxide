@@ -1563,6 +1563,7 @@ dependencies = [
  "hkdf",
  "image",
  "ml-kem",
+ "png",
  "rand 0.10.2",
  "rayon",
  "sha3 0.12.0",

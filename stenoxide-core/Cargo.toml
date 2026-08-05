@@ -15,6 +15,7 @@ categories = ["cryptography", "multimedia::images"]
 
 [dependencies]
 image.workspace = true
+png.workspace = true
 zstd.workspace = true
 argon2.workspace = true
 hkdf.workspace = true

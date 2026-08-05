@@ -267,6 +267,10 @@ To update an existing ruleset, `PUT` to `…/rulesets/{id}` with the same file;
 gh api repos/OWNER/REPO/rules/branches/NAME
 ```
 
+`main` applies cleanly this way. `stable` does not: it needs one actor the file
+cannot carry, and is created from the web interface instead — see
+[The one bypass](#the-one-bypass-and-why-it-cannot-be-applied-from-the-file).
+
 ### `stable`
 
 `stable` publishes, so the gate in front of it is the one that has to hold: a
@@ -286,16 +290,46 @@ Approvals are not required. A repository this size would only be gating on its
 own author, and a rule that has to be bypassed on every merge protects nothing.
 The checks are what the rule is for.
 
-#### The one bypass
+#### The one bypass, and why it cannot be applied from the file
 
-GitHub Actions is a bypass actor, and has to be. The release job pushes the
-version commit to `stable` with `GITHUB_TOKEN`, and every rule above applies to
-direct pushes as much as to merges — without the bypass the first release would
-fail on its own protection.
+GitHub Actions has to be a bypass actor. The release job pushes the version
+commit to `stable` with `GITHUB_TOKEN`, and every rule above applies to direct
+pushes as much as to merges — without the bypass the first release fails on its
+own protection.
 
-This is why the rules are a ruleset rather than a classic branch protection
-rule: classic protection can exempt administrators, which is both broader than
-needed and does not cover a bot, while a ruleset can name GitHub Actions
+That actor is the one thing this file cannot carry. Declared as
+`{"actor_type": "Integration", "actor_id": 15368}`, the API answers
+
+```
+422  Actor GitHub Actions integration must be part of the ruleset source or
+     owner organization
+```
+
+because `gh api orgs/OWNER/installations` lists no apps: GitHub Actions is
+first-party and never appears there. The web interface offers it regardless, so
+**`stable` is created in two steps** — import the file, then add the actor:
+
+1. *Settings → Rules → Rulesets → New ruleset → Import a ruleset*, and select
+   `.github/rulesets/stable.json`.
+2. In the new ruleset, *Bypass list → Add bypass → GitHub Actions*, and save.
+
+Applying step 1 without step 2 leaves `stable` protected against its own release
+job, and every release from then on fails at the push. Check both before
+trusting it:
+
+```sh
+gh api repos/OWNER/REPO/rules/branches/stable --jq '[.[].type]'
+gh api repos/OWNER/REPO/rulesets/ID --jq '.bypass_actors'
+```
+
+An empty first result means the branch has no protection at all — which is the
+state `stable` was in from the day the file was written until it was noticed,
+and what let a squash reach it in the first place. See "Why the numbers jump" in
+[`CHANGELOG.md`](../../CHANGELOG.md) for what that cost.
+
+The rules are a ruleset rather than a classic branch protection rule for the
+same actor: classic protection can exempt administrators, which is both broader
+than needed and does not cover a bot, while a ruleset can name GitHub Actions
 specifically and leave everyone else fully gated.
 
 ### `main`

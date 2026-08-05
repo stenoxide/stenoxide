@@ -9,8 +9,81 @@ permissions:
   contents: write
 
 jobs:
+  # Nothing else in this chain checks the tree it is about to publish. The
+  # release job trusts the CI run of the pull request that was merged, and that
+  # trust rests entirely on repository configuration — the ruleset that makes
+  # the CI job a required check on `stable`. Configuration is not reviewed in a
+  # pull request, does not travel in a fork and can be switched off without
+  # leaving a trace in the tree, so the same guarantee is stated here as well,
+  # where it is version-controlled.
+  #
+  # A job of its own rather than steps at the top of `release`, for a reason
+  # steps cannot give: `release` checks out with a write token and runs under
+  # `contents: write`, and executing the workspace's own test code inside that
+  # job would run it beside credentials it has no business being near. This job
+  # asks for `contents: read` and nothing else. The ordering then follows from
+  # `needs` rather than from where a step happens to sit in a list: `release`
+  # waits for this job, and `build`, `github-release` and `publish` all wait for
+  # `release`, so no effectful step in the workflow — no version bump, no
+  # commit, no tag, no release, no `cargo publish` — can begin until this job
+  # has passed.
+  verify:
+    name: Verify the workspace
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      # `ref: stable` rather than the merge ref: the tree that is about to be
+      # published is the branch, and that is what has to be verified.
+      - uses: actions/checkout@v4
+        with:
+          ref: stable
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The whole suite, in release. The embedding invariant gate runs a full
+      # pipeline over a four-megapixel container and a HILL cost map, which is
+      # minutes of work in a debug build and half a minute in an optimised one;
+      # everything else in the suite is small enough not to care which profile
+      # it gets.
+      - name: cargo test
+        run: cargo test --workspace --release
+
+      # The audit is repeated and the coverage floor is not, which is a
+      # judgement about what each one measures. Coverage is a property of the
+      # tree, and the tree has not changed since the pull request that was just
+      # merged; re-measuring it would cost a `cargo install`, a second
+      # instrumented build and a second run of the suite to reprint a number
+      # already known. The advisory database is not a property of the tree: it
+      # moves on its own, and a vulnerability published between the merge and
+      # this run is exactly the kind of thing that must stop a release rather
+      # than ship in one.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit
+        run: cargo audit
+
   release:
     name: Version, build and publish
+    needs: verify
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
 

@@ -93,6 +93,18 @@ jobs:
       sha: ${{ steps.commit.outputs.sha }}
 
     steps:
+      # The default GITHUB_TOKEN cannot push to `stable`: the branch ruleset
+      # requires every change to go through a pull request, and that token has
+      # no bypass entry. `stenoxide-release-bot` does, scoped to exactly this
+      # job's need — an installation token minted fresh for this run, valid
+      # only for its duration.
+      - name: Generate a token for the release bot
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
       # `ref: stable` rather than the default: on a closed pull_request the
       # default checkout is the detached merge ref, which cannot be pushed back
       # to the branch. `fetch-depth: 0` brings the tags the version calculation
@@ -101,7 +113,7 @@ jobs:
         with:
           ref: stable
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
